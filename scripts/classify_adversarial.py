@@ -8,7 +8,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 def load_data(file_path):
     df = pd.read_csv(file_path)
-    return df
+    return df.head(10)
 
 
 def construct_prompts(df):
@@ -41,7 +41,8 @@ def load_model(model_name="meta-llama/Llama-3.2-1B"):
 
 def classify_samples(tokenizer, model, prompts):
     predictions = []
-    for prompt in prompts:
+    for i, prompt in enumerate(prompts):
+        print(f"Processing prompt {i+1}/{len(prompts)}: {prompt}")  # 增加更多的输出语句，显示当前处理进度
         input_ids = tokenizer.encode(prompt, return_tensors='pt')
         with torch.no_grad():
             output_ids = model.generate(
@@ -52,6 +53,7 @@ def classify_samples(tokenizer, model, prompts):
         output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
         prediction = parse_answer(output_text)
         predictions.append(prediction)
+        print(f"Prediction for prompt {i+1}: {prediction}")  # 增加输出预测结果
     return predictions
 
 
@@ -65,6 +67,7 @@ def parse_answer(output_text):
     elif 'NOT ENOUGH INFO' in answer:
         return 'NOT ENOUGH INFO'
     else:
+        print("Answer is ",answer)
         return 'UNKNOWN'
 
 
@@ -92,7 +95,7 @@ def compare_results(df, original_predictions, adversarial_predictions):
 
 def main():
     # 加载数据
-    df = load_data('./data/adversarial_dataset.csv')
+    df = load_data('/content/llama_adversarial_classification/data/adversarial_dataset.csv')
 
     # 构建提示
     original_prompts, adversarial_prompts = construct_prompts(df)
@@ -112,8 +115,8 @@ def main():
     result_df = compare_results(df, original_predictions, adversarial_predictions)
 
     # 保存结果
-    result_df.to_csv('./data/classification_results.csv', index=False)
-    print("Results saved to './data/classification_results.csv'")
+    # result_df.to_csv('/content/llama_adversarial_classification/scripts/classification_results.csv', index=False)
+    # print("Results saved to './data/classification_results.csv'")
 
 
 if __name__ == "__main__":
