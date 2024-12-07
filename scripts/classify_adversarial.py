@@ -65,6 +65,7 @@ def parse_answer(output_text):
     elif 'NOT ENOUGH INFO' in answer:
         return 'NOT ENOUGH INFO'
     else:
+        print(answer)
         return 'UNKNOWN'
 
 
