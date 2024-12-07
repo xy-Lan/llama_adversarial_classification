@@ -27,13 +27,13 @@ def construct_prompts(df):
     return original_prompts, adversarial_prompts
 
 
-def load_model(model_name="meta-llama/Llama-3.2-1B"):
+def load_model(model_name="meta-llama/Llama-3.2-1B", token="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"):
     # tokenizer = LlamaTokenizer.from_pretrained(model_dir)
     # model = LlamaForCausalLM.from_pretrained(model_dir)
     # model.eval()
     print("Loading model...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token)
+    model = AutoModelForCausalLM.from_pretrained(model_name, use_auth_token=token)
     model.eval()
     print("Model loaded successfully!")
     return tokenizer, model
@@ -100,8 +100,10 @@ def main():
     # 构建提示
     original_prompts, adversarial_prompts = construct_prompts(df)
 
+    token = "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"
+
     # 加载模型
-    tokenizer, model = load_model()
+    tokenizer, model = load_model(token=token)
 
     # 对原始样本进行分类
     print("Classifying original samples...")
