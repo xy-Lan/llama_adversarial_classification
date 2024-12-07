@@ -14,20 +14,43 @@ def load_data(file_path):
 def construct_prompts(df):
     original_prompts = []
     adversarial_prompts = []
+
     for index, row in df.iterrows():
         original_sample = row['original_samples']
         adversarial_sample = row['adversarial_samples']
 
-        # 构建新的提示，要求模型判断句子的真实性
-        original_prompt = f"Statement: {original_sample}\nQuestion: Is this statement true or false based on common knowledge? Answer with 'SUPPORTED', 'REFUTED', or 'NOT ENOUGH INFO'.\nAnswer:"
-        adversarial_prompt = f"Statement: {adversarial_sample}\nQuestion: Is this statement true or false based on common knowledge? Answer with 'SUPPORTED', 'REFUTED', or 'NOT ENOUGH INFO'.\nAnswer:"
+        # 分离 evidence 和 claim
+        if "~" in original_sample:
+            evidence_original, claim_original = original_sample.split("~", 1)
+        else:
+            raise ValueError(f"Original sample at index {index} is not properly formatted.")
+
+        if "~" in adversarial_sample:
+            evidence_adversarial, claim_adversarial = adversarial_sample.split("~", 1)
+        else:
+            raise ValueError(f"Adversarial sample at index {index} is not properly formatted.")
+
+        # 构建 prompt，将 evidence 和 claim 分开
+        original_prompt = (
+            f"Evidence: {evidence_original.strip()}\n"
+            f"Claim: {claim_original.strip()}\n"
+            "Question: Is this claim supported, refuted, or not enough information based on the evidence?\n"
+            "Answer:"
+        )
+        adversarial_prompt = (
+            f"Evidence: {evidence_adversarial.strip()}\n"
+            f"Claim: {claim_adversarial.strip()}\n"
+            "Question: Is this claim supported, refuted, or not enough information based on the evidence?\n"
+            "Answer:"
+        )
 
         original_prompts.append(original_prompt)
         adversarial_prompts.append(adversarial_prompt)
+
     return original_prompts, adversarial_prompts
 
 
-def load_model(model_name="meta-llama/Llama-3.2-1B", token="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"):
+def load_model(model_name="meta-llama/Llama-3.2-3B-Instruct", token="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"):
     # tokenizer = LlamaTokenizer.from_pretrained(model_dir)
     # model = LlamaForCausalLM.from_pretrained(model_dir)
     # model.eval()
