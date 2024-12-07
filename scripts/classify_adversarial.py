@@ -95,23 +95,30 @@ def parse_answer(output_text):
 
 
 def compare_results(df, original_predictions, adversarial_predictions):
+    # 添加预测结果列
     df['original_prediction'] = original_predictions
     df['adversarial_prediction'] = adversarial_predictions
 
     # 检测分类结果是否翻转
     df['prediction_flipped'] = df['original_prediction'] != df['adversarial_prediction']
 
-    # 只考虑人工标注为保留原意的样本（agreed_labels == 0）
-    df_preserve = df[df['agreed_labels'] == 0]
+    # 计算 Flip Rate
+    total_samples = len(df)  # 所有样本的数量
+    flipped_samples = df['prediction_flipped'].sum()  # 分类结果翻转的样本数量
+    flip_rate = flipped_samples / total_samples if total_samples > 0 else 0
 
-    # 在保留原意的情况下，统计分类结果翻转的比例
-    total_preserve_samples = len(df_preserve)
-    flipped_preserve_samples = df_preserve['prediction_flipped'].sum()
-    flip_rate_preserve = flipped_preserve_samples / total_preserve_samples if total_preserve_samples > 0 else 0
+    # 计算 Similarity-Weighted Flip Rate
+    df_preserve = df[df['agreed_labels'] == 0]  # 保留原义的样本
+    flipped_preserve_samples = df_preserve['prediction_flipped'].sum()  # 保留原义中翻转的样本数量
+    similarity_weighted_flip_rate = flipped_preserve_samples / total_samples if total_samples > 0 else 0
 
-    print(f"Total samples where meaning is preserved (agreed_labels == 0): {total_preserve_samples}")
-    print(f"Classification flipped on {flipped_preserve_samples} samples where meaning is preserved.")
-    print(f"Flip rate in preserved meaning samples: {flip_rate_preserve:.2%}")
+    # 输出结果
+    print(f"Total samples: {total_samples}")
+    print(f"Total flipped samples: {flipped_samples}")
+    print(f"Flip Rate: {flip_rate:.2%}")
+    print(f"Total preserved meaning samples (agreed_labels == 0): {len(df_preserve)}")
+    print(f"Flipped samples in preserved meaning: {flipped_preserve_samples}")
+    print(f"Similarity-Weighted Flip Rate: {similarity_weighted_flip_rate:.2%}")
 
     return df
 
