@@ -8,29 +8,58 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 def load_data(file_path):
     df = pd.read_csv(file_path)
-    return df.head(10)
+    return df.head(100)
 
 
 def construct_prompts(df):
     original_prompts = []
     adversarial_prompts = []
+    skipped_samples = []  # 记录被剔除的样本索引
 
     for index, row in df.iterrows():
         original_sample = row['original_samples']
         adversarial_sample = row['adversarial_samples']
 
-        # 分离 evidence 和 claim
-        if "~" in original_sample:
-            evidence_original, claim_original = original_sample.split("~", 1)
-        else:
-            raise ValueError(f"Original sample at index {index} is not properly formatted.")
+        # 检查原始样本是否为字符串
+        if not isinstance(original_sample, str):
+            print(f"Skipping sample at index {index}: Original sample not a string.")
+            skipped_samples.append(index)
+            continue
 
-        if "~" in adversarial_sample:
-            evidence_adversarial, claim_adversarial = adversarial_sample.split("~", 1)
-        else:
-            raise ValueError(f"Adversarial sample at index {index} is not properly formatted.")
+        original_sample = original_sample.strip()
 
-        # 构建 prompt，将 evidence 和 claim 分开
+        # 检查对抗性样本是否为字符串
+        if not isinstance(adversarial_sample, str):
+            print(f"Skipping sample at index {index}: Adversarial sample not a string.")
+            skipped_samples.append(index)
+            continue
+
+        adversarial_sample = adversarial_sample.strip()
+
+        # 检查分隔符是否存在（针对原始和对抗性样本）
+        if "~" not in original_sample or "~" not in adversarial_sample:
+            print(f"Skipping sample at index {index}: Missing '~' separator in one or both samples.")
+            skipped_samples.append(index)
+            continue
+
+        # 检查原始样本分割结果是否有效
+        original_parts = original_sample.split("~", 1)
+        if len(original_parts) != 2 or not original_parts[0].strip() or not original_parts[1].strip():
+            print(f"Skipping sample at index {index}: Improperly formatted original sample.")
+            skipped_samples.append(index)
+            continue
+
+        # 检查对抗性样本分割结果是否有效
+        adversarial_parts = adversarial_sample.split("~", 1)
+        if len(adversarial_parts) != 2 or not adversarial_parts[0].strip() or not adversarial_parts[1].strip():
+            print(f"Skipping sample at index {index}: Improperly formatted adversarial sample.")
+            skipped_samples.append(index)
+            continue
+
+        # 构建原始和对抗性 Prompts
+        evidence_original, claim_original = original_parts
+        evidence_adversarial, claim_adversarial = adversarial_parts
+
         original_prompt = (
             f"Evidence: {evidence_original.strip()}\n"
             f"Claim: {claim_original.strip()}\n"
@@ -47,7 +76,15 @@ def construct_prompts(df):
         original_prompts.append(original_prompt)
         adversarial_prompts.append(adversarial_prompt)
 
-    return original_prompts, adversarial_prompts
+    # 统计有效样本总数
+    total_samples = len(df)
+    valid_samples = total_samples - len(skipped_samples)
+
+    print(f"Total samples: {total_samples}")
+    print(f"Skipped samples: {len(skipped_samples)}")
+    print(f"Valid samples: {valid_samples}")
+
+    return original_prompts, adversarial_prompts, skipped_samples, valid_samples
 
 
 def load_model(model_name="meta-llama/Llama-3.2-3B-Instruct", token="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"):
@@ -65,7 +102,7 @@ def load_model(model_name="meta-llama/Llama-3.2-3B-Instruct", token="hf_tDYUTZnd
 def classify_samples(tokenizer, model, prompts):
     predictions = []
     for i, prompt in enumerate(prompts):
-        print(f"Processing prompt {i+1}/{len(prompts)}: {prompt}")  # 增加更多的输出语句，显示当前处理进度
+        print(f"Processing prompt {i + 1}/{len(prompts)}: {prompt}")  # 增加更多的输出语句，显示当前处理进度
         input_ids = tokenizer.encode(prompt, return_tensors='pt')
         with torch.no_grad():
             output_ids = model.generate(
@@ -76,7 +113,7 @@ def classify_samples(tokenizer, model, prompts):
         output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
         prediction = parse_answer(output_text)
         predictions.append(prediction)
-        print(f"Prediction for prompt {i+1}: {prediction}")  # 增加输出预测结果
+        print(f"Prediction for prompt {i + 1}: {prediction}")  # 增加输出预测结果
     return predictions
 
 
@@ -90,11 +127,11 @@ def parse_answer(output_text):
     elif 'NOT ENOUGH INFO' in answer:
         return 'NOT ENOUGH INFO'
     else:
-        print("Answer is ",answer)
+        print("Answer is ", answer)
         return 'UNKNOWN'
 
 
-def compare_results(df, original_predictions, adversarial_predictions):
+def compare_results(df, original_predictions, adversarial_predictions, valid_samples):
     # 添加预测结果列
     df['original_prediction'] = original_predictions
     df['adversarial_prediction'] = adversarial_predictions
@@ -105,12 +142,12 @@ def compare_results(df, original_predictions, adversarial_predictions):
     # 计算 Flip Rate
     total_samples = len(df)  # 所有样本的数量
     flipped_samples = df['prediction_flipped'].sum()  # 分类结果翻转的样本数量
-    flip_rate = flipped_samples / total_samples if total_samples > 0 else 0
+    flip_rate = flipped_samples / valid_samples if valid_samples > 0 else 0
 
     # 计算 Similarity-Weighted Flip Rate
     df_preserve = df[df['agreed_labels'] == 0]  # 保留原义的样本
     flipped_preserve_samples = df_preserve['prediction_flipped'].sum()  # 保留原义中翻转的样本数量
-    similarity_weighted_flip_rate = flipped_preserve_samples / total_samples if total_samples > 0 else 0
+    similarity_weighted_flip_rate = flipped_preserve_samples / valid_samples if valid_samples else 0
 
     # 输出结果
     print(f"Total samples: {total_samples}")
@@ -128,7 +165,7 @@ def main():
     df = load_data('/content/llama_adversarial_classification/data/adversarial_dataset.csv')
 
     # 构建提示
-    original_prompts, adversarial_prompts = construct_prompts(df)
+    original_prompts, adversarial_prompts, skipped_samples, valid_samples = construct_prompts(df)
 
     token = "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"
 
@@ -143,8 +180,10 @@ def main():
     print("Classifying adversarial samples...")
     adversarial_predictions = classify_samples(tokenizer, model, adversarial_prompts)
 
+    valid_df = df.drop(index=skipped_samples).reset_index(drop=True)
+
     # 比较结果
-    result_df = compare_results(df, original_predictions, adversarial_predictions)
+    result_df = compare_results(valid_df, original_predictions, adversarial_predictions, valid_samples)
 
     # 保存结果
     # result_df.to_csv('/content/llama_adversarial_classification/scripts/classification_results.csv', index=False)
@@ -153,6 +192,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
