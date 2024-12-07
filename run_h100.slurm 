@@ -11,4 +11,4 @@
 module load Python/3.10.4-GCCcore-11.3.0
 module load CUDA/11.8.0
 
-python3 classify_adversarial.py
+python3 scripts/classify_adversarial.py
