@@ -7,9 +7,14 @@ from accelerate import init_empty_weights, infer_auto_device_map
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
 
+# def load_data(file_path):
+#     df = pd.read_csv(file_path)
+#     return df.head(100)
+
 def load_data(file_path):
-    df = pd.read_csv(file_path)
-    return df.head(100)
+    # 显式将 range 转换为列表
+    df = pd.read_csv(file_path, skiprows=list(range(1, 101)), nrows=250)
+    return df
 
 
 def construct_prompts(df):
