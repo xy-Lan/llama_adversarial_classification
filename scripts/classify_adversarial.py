@@ -93,7 +93,7 @@ def construct_prompts(df):
     return original_prompts, adversarial_prompts, skipped_samples, valid_samples
 
 
-def load_model(model_name="meta-llama/Llama-3.1-8B-Instruct", token="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"):
+def load_model(model_name="Llama-3.2-11B-Vision-Instruct", token="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"):
     # tokenizer = LlamaTokenizer.from_pretrained(model_dir)
     # model = LlamaForCausalLM.from_pretrained(model_dir)
     # model.eval()
