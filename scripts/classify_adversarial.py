@@ -100,16 +100,16 @@ def load_model(model_name="meta-llama/Llama-3.2-1B-Instruct", token="hf_tDYUTZnd
     # )
 
     # 加载分布式模型（空权重加载）
-    with init_empty_weights():
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            # quantization_config=quant_config,
-            use_auth_token=token
-            # device_map="auto"  # 自动分配到可用 GPU 和 CPU
-        )
+    # with init_empty_weights():
+    #     model = AutoModelForCausalLM.from_pretrained(
+    #         model_name,
+    #         # quantization_config=quant_config,
+    #         use_auth_token=token
+    #         # device_map="auto"  # 自动分配到可用 GPU 和 CPU
+    #     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token)
-    # model = AutoModelForCausalLM.from_pretrained(model_name, use_auth_token=token)
+    model = AutoModelForCausalLM.from_pretrained(model_name, use_auth_token=token)
     model.eval()
     print("Model loaded successfully!")
     return tokenizer, model
