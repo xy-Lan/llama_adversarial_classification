@@ -88,24 +88,24 @@ def construct_prompts(df):
     return original_prompts, adversarial_prompts, skipped_samples, valid_samples
 
 
-def load_model(model_name="meta-llama/Llama-3.3-70B-Instruct", token="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"):
+def load_model(model_name="meta-llama/Llama-3.2-1B-Instruct", token="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"):
     # tokenizer = LlamaTokenizer.from_pretrained(model_dir)
     # model = LlamaForCausalLM.from_pretrained(model_dir)
     # model.eval()
     print("Loading model...")
     # 配置 INT8 量化
-    quant_config = BitsAndBytesConfig(
-        load_in_8bit=True,  # 启用 INT8 量化
-        llm_int8_enable_fp32_cpu_offload=True,  # 在 CPU 上保留 FP32 精度
-    )
+    # quant_config = BitsAndBytesConfig(
+    #     load_in_8bit=True,  # 启用 INT8 量化
+    #     llm_int8_enable_fp32_cpu_offload=True,  # 在 CPU 上保留 FP32 精度
+    # )
 
     # 加载分布式模型（空权重加载）
     with init_empty_weights():
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            quantization_config=quant_config,
-            use_auth_token=token,
-            device_map="auto"  # 自动分配到可用 GPU 和 CPU
+            # quantization_config=quant_config,
+            use_auth_token=token
+            # device_map="auto"  # 自动分配到可用 GPU 和 CPU
         )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token)
