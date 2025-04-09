@@ -14,7 +14,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 def load_data(file_path):
     # 显式将 range 转换为列表
     # df = pd.read_csv(file_path, skiprows=list(range(1, 101)), nrows=250)
-    df = pd.read_csv(file_path, nrows=10)
+    df = pd.read_csv(file_path)
     return df
 
 
@@ -173,15 +173,15 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
 
     # 导出成功翻转的样本到CSV文件
     flipped_samples_df = df[df['prediction_flipped'] == True]
-    flipped_samples_df.to_csv('./data/Llama-3.2-3B-Instruct_flipped_samples_1.csv', index=False)
+    flipped_samples_df.to_csv('./data/Llama-3.2-3B-Instruct_flipped_samples.csv', index=False)
     print(
-        f"Successfully exported {len(flipped_samples_df)} flipped samples to './data/Llama-3.2-3B-Instruct_flipped_samples_1.csv'")
+        f"Successfully exported {len(flipped_samples_df)} flipped samples to './data/Llama-3.2-3B-Instruct_flipped_samples.csv'")
 
     # 导出保留原义且成功翻转的样本到CSV文件
     preserved_flipped_df = df[(df['agreed_labels'] == 0) & (df['prediction_flipped'] == True)]
-    preserved_flipped_df.to_csv('./data/Llama-3.2-3B-Instruct_preserved_flipped_samples_1.csv', index=False)
+    preserved_flipped_df.to_csv('./data/Llama-3.2-3B-Instruct_preserved_flipped_samples.csv', index=False)
     print(
-        f"Successfully exported {len(preserved_flipped_df)} preserved meaning flipped samples to './data/Llama-3.2-3B-Instruct_preserved_flipped_samples_1.csv'")
+        f"Successfully exported {len(preserved_flipped_df)} preserved meaning flipped samples to './data/Llama-3.2-3B-Instruct_preserved_flipped_samples.csv'")
 
     # 输出结果
     print(f"Total samples: {total_samples}")
