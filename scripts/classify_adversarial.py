@@ -14,7 +14,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 def load_data(file_path):
     # 加载第401行到最后一行
     # df = pd.read_csv(file_path, skiprows=list(range(1, 401)))
-    df = pd.read_csv(file_path, nrows=300)
+    df = pd.read_csv(file_path, nrows=100)
     return df
 
 
@@ -173,7 +173,7 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
 
     # 导出成功翻转的样本到CSV文件
     flipped_samples_df = df[df['prediction_flipped'] == True]
-    flipped_samples_df.to_csv('./data/meta-llama/Llama-3.2-11B-Vision-Instruct_1.csv', index=False)
+    flipped_samples_df.to_csv('./data/Llama-3.2-11B-Vision-Instruct_1.csv', index=False)
     print(
         f"Successfully exported {len(flipped_samples_df)} flipped samples to './data/Llama-3.2-11B-Vision-Instruct_1.csv'")
 
