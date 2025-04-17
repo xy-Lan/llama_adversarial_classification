@@ -24,62 +24,73 @@ def prepare_training_data(csv_file):
     print(f"加载训练数据: {csv_file}")
     df = pd.read_csv(csv_file)
 
-    formatted_data = []
+    # 检查列是否存在prediction列
+    has_predictions = 'original_prediction' in df.columns and 'adversarial_prediction' in df.columns
 
-    for _, row in df.iterrows():
-        # 处理原始样本
-        original_sample = row['original_samples']
-        if '~' in original_sample:
+    formatted_data = []
+    skipped_rows = 0
+
+    for idx, row in df.iterrows():
+        try:
+            # 处理原始样本
+            original_sample = row['original_samples']
+            if not isinstance(original_sample, str) or '~' not in original_sample:
+                print(f"跳过行 {idx}: 原始样本格式不正确")
+                skipped_rows += 1
+                continue
+
             evidence_original, claim_original = original_sample.split('~', 1)
 
             # 处理对抗性样本
             adversarial_sample = row['adversarial_samples']
+            if not isinstance(adversarial_sample, str) or '~' not in adversarial_sample:
+                print(f"跳过行 {idx}: 对抗性样本格式不正确")
+                skipped_rows += 1
+                continue
+
             evidence_adversarial, claim_adversarial = adversarial_sample.split('~', 1)
 
             # 获取语义一致性标签
-            semantics_preserved = row['agreed_labels'] == 0
+            semantics_preserved = row['agreed_labels'] == 0.0
 
-            # 为原始样本创建训练样本
+            # 如果数据集中没有预测，则跳过（或者设置默认值）
+            if not has_predictions:
+                # 你可以选择跳过这些行
+                if idx < 5:  # 只打印前5行的警告
+                    print(f"警告: 行 {idx} 没有预测标签，使用默认标签 'SUPPORTED'")
+                # 默认标签
+                output_original = "SUPPORTED"
+            else:
+                # 使用已有的预测作为标签
+                output_original = row['original_prediction']
+                if pd.isna(output_original):
+                    if idx < 5:
+                        print(f"警告: 行 {idx} 的原始预测为空，使用默认标签 'SUPPORTED'")
+                    output_original = "SUPPORTED"
+
+            # 创建指令
             instruction = (
                 "You are a fact verification assistant. Given evidence and a claim, "
                 "determine if the claim is SUPPORTED, REFUTED, or if there's NOT ENOUGH INFO "
                 "based solely on the provided evidence."
             )
 
-            # 原始样本的输入和标签
-            input_original = f"Evidence: {evidence_original.strip()}\nClaim: {claim_original.strip()}\nQuestion: Is this claim supported, refuted, or not enough information based on the evidence?"
-
-            # 使用正确的预测作为标签（如果有的话）
-            if 'original_prediction' in row:
-                output_original = row['original_prediction']
-            elif 'gold_label' in row:
-                output_original = row['gold_label']
-            else:
-                # 如果没有标签，跳过这个样本
-                continue
-
-            # 为对抗性样本创建训练样本
-            # 如果保留了语义（agreed_labels=0），那么标签应该与原始样本相同
-            if semantics_preserved:
-                input_adversarial = f"Evidence: {evidence_adversarial.strip()}\nClaim: {claim_adversarial.strip()}\nQuestion: Is this claim supported, refuted, or not enough information based on the evidence?"
-                output_adversarial = output_original  # 语义保持相同，标签也应相同
-
-                # 添加对抗性样本
-                formatted_data.append({
-                    "instruction": instruction,
-                    "input": input_adversarial,
-                    "output": output_adversarial
-                })
-
             # 添加原始样本
             formatted_data.append({
                 "instruction": instruction,
-                "input": input_original,
+                "input": f"Evidence: {evidence_original.strip()}\nClaim: {claim_original.strip()}\nQuestion: Is this claim supported, refuted, or not enough information based on the evidence?",
                 "output": output_original
             })
 
-            # 添加一致性示例（仅对保留语义的样本）
+            # 仅为保留语义的样本添加对抗性样本（使其有相同的标签）
             if semantics_preserved:
+                formatted_data.append({
+                    "instruction": instruction,
+                    "input": f"Evidence: {evidence_adversarial.strip()}\nClaim: {claim_adversarial.strip()}\nQuestion: Is this claim supported, refuted, or not enough information based on the evidence?",
+                    "output": output_original  # 使用相同标签
+                })
+
+                # 添加一致性示例
                 consistency_instruction = (
                     "You are a fact verification assistant. Given two different presentations "
                     "of the same evidence and claim with identical meaning, you should provide "
@@ -100,6 +111,12 @@ def prepare_training_data(csv_file):
                     "output": consistency_output
                 })
 
+        except Exception as e:
+            print(f"处理行 {idx} 时出错: {str(e)}")
+            skipped_rows += 1
+            continue
+
+    print(f"总行数: {len(df)}, 跳过的行数: {skipped_rows}, 处理的行数: {len(df) - skipped_rows}")
     print(f"准备了 {len(formatted_data)} 条训练样本")
     return formatted_data
 
