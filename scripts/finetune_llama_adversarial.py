@@ -1,11 +1,13 @@
+#!/usr/bin/env python3
 import os
 import logging
+import warnings
+import argparse
 import pandas as pd
 import torch
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     TrainingArguments,
     Trainer,
     DataCollatorForSeq2Seq
@@ -13,11 +15,9 @@ from transformers import (
 from peft import (
     LoraConfig,
     get_peft_model,
-    prepare_model_for_kbit_training,
     TaskType
 )
 from datasets import Dataset
-import warnings
 
 # 配置日志
 logging.basicConfig(
@@ -25,6 +25,10 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+
+# 忽略特定警告
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
 
 
 def setup_device_info():
@@ -139,9 +143,9 @@ def finetune_llama(
         output_dir="models/llama-1b-adversarial-finetuned",
         epochs=3,
         learning_rate=2e-4,
-        batch_size=8,
-        gradient_accumulation_steps=4,
-        use_8bit=True,
+        batch_size=4,  # 根据GPU显存调整
+        gradient_accumulation_steps=8,  # 根据GPU显存调整
+        use_8bit=False,
         use_4bit=False,
         lora_rank=16,
         lora_alpha=32,
@@ -149,10 +153,6 @@ def finetune_llama(
         huggingface_token=None
 ):
     """主微调函数"""
-    # 配置警告过滤
-    warnings.filterwarnings('ignore', category=UserWarning)
-    warnings.filterwarnings('ignore', category=FutureWarning)
-
     # 打印设备信息
     setup_device_info()
 
@@ -171,26 +171,6 @@ def finetune_llama(
         'input': [item['input'] for item in training_data],
         'output': [item['output'] for item in training_data]
     })
-
-    # 设置量化配置
-    quantization_config = None
-    if use_8bit:
-        quantization_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-            llm_int8_threshold=6.0,
-            llm_int8_enable_fp32_cpu_offload=True
-        )
-    elif use_4bit:
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_method = "fp4"
-        )
-
-    # 选择设备
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # 加载分词器
     logging.info(f"加载模型和分词器: {model_name}")
@@ -212,11 +192,10 @@ def finetune_llama(
     try:
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            quantization_config=quantization_config,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float16,  # 使用半精度
             use_auth_token=huggingface_token,
             trust_remote_code=True,
-            device_map={"": device}
+            device_map="auto"
         )
     except Exception as e:
         logging.error(f"加载模型失败: {e}")
@@ -224,10 +203,6 @@ def finetune_llama(
 
     # 设置Gradient Checkpointing以节省内存
     model.gradient_checkpointing_enable()
-
-    # 准备模型进行训练
-    if use_8bit or use_4bit:
-        model = prepare_model_for_kbit_training(model)
 
     # 设置LoRA配置
     target_modules = [
@@ -347,24 +322,33 @@ def finetune_llama(
 
 def main():
     """主程序入口"""
-    # 设置Hugging Face token(如果需要访问Llama模型)
-    hf_token = os.environ.get('HF_TOKEN', None)  # 建议使用环境变量
+    # 设置参数解析
+    parser = argparse.ArgumentParser(description='Llama Adversarial Fine-Tuning')
+    parser.add_argument('--model', type=str, default="meta-llama/Llama-3.2-1B-Instruct", help='模型名称')
+    parser.add_argument('--data', type=str, default="data/final_complete_training_set.csv", help='训练数据文件')
+    parser.add_argument('--output', type=str, default="models/llama-1b-adversarial-finetuned", help='模型输出目录')
+    parser.add_argument('--epochs', type=int, default=3, help='训练轮数')
+    parser.add_argument('--batch_size', type=int, default=4, help='批量大小')
+    parser.add_argument('--lr', type=float, default=2e-4, help='学习率')
+    parser.add_argument('--hf_token', type=str, help='Hugging Face Token')
 
-    # 如果没有设置环境变量，可以在这里直接设置token
+    # 解析参数
+    args = parser.parse_args()
+
     hf_token = "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"
 
-    # 检查token
     if not hf_token:
         logging.warning("未提供Hugging Face Token，可能无法访问私有模型")
 
     # 执行微调
     finetune_llama(
-        training_data_file="data/final_complete_training_set.csv",
-        output_dir="models/llama-1b-adversarial-finetuned",
+        model_name=args.model,
+        training_data_file=args.data,
+        output_dir=args.output,
         huggingface_token=hf_token,
-        epochs=3,  # 根据需要调整
-        batch_size=8,  # 根据GPU内存调整
-        use_8bit=True  # 使用8位量化以节省内存
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.lr
     )
 
 
