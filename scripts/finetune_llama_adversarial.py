@@ -185,7 +185,8 @@ def finetune_llama(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.float16,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_method = "fp4"
         )
 
     # 选择设备
@@ -350,7 +351,7 @@ def main():
     hf_token = os.environ.get('HF_TOKEN', None)  # 建议使用环境变量
 
     # 如果没有设置环境变量，可以在这里直接设置token
-    # hf_token = "your_huggingface_token"
+    hf_token = "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"
 
     # 检查token
     if not hf_token:
