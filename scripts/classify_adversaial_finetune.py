@@ -71,35 +71,14 @@ def construct_prompts(df):
     return original_prompts, adversarial_prompts, skipped_samples, valid_samples
 
 
-def load_model(base_model_name, peft_model_path):
-    """加载微调后的PEFT模型"""
-    print("加载基础模型...")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        base_model_name,
-        torch_dtype=torch.float16,
-        device_map="auto"
-    )
-
-    print("加载分词器...")
-    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
-
-    print("加载PEFT适配器...")
-    model = PeftModel.from_pretrained(base_model, peft_model_path)
-
-    # 合并适配器
-    model = model.merge_and_unload()
-    model.eval()
-
-    print("模型加载成功!")
-    return tokenizer, model
-
-
 def classify_samples(tokenizer, model, prompts):
     """对样本进行分类"""
     predictions = []
     for i, prompt in enumerate(prompts):
         print(f"处理提示 {i + 1}/{len(prompts)}")
-        input_ids = tokenizer.encode(prompt, return_tensors='pt')
+
+        # 确保输入在正确的设备上
+        input_ids = tokenizer.encode(prompt, return_tensors='pt').to(model.device)
 
         with torch.no_grad():
             output_ids = model.generate(
@@ -114,6 +93,33 @@ def classify_samples(tokenizer, model, prompts):
         print(f"提示 {i + 1} 的预测结果: {prediction}")
 
     return predictions
+
+
+def load_model(base_model_name, peft_model_path):
+    """加载微调后的PEFT模型"""
+    print("加载基础模型...")
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_model_name,
+        torch_dtype=torch.float16,
+        device_map="auto"
+    )
+
+    print("加载分词器...")
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+
+    # 确保分词器有必要的特殊标记
+    if not tokenizer.pad_token:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    print("加载PEFT适配器...")
+    model = PeftModel.from_pretrained(base_model, peft_model_path)
+
+    # 合并适配器
+    model = model.merge_and_unload()
+    model.eval()
+
+    print("模型加载成功!")
+    return tokenizer, model
 
 
 def parse_answer(output_text):
