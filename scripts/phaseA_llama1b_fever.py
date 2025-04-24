@@ -1,195 +1,166 @@
-"""
-phaseA_llama1b_fever.py  ──────────────────────────────────────────────
-
-End‑to‑end **Phase A** fine‑tuning script, now defaulting to
-`meta‑llama/Llama‑3.2‑1B‑Instruct` and supporting a Hugging Face token for
-private‑repo download.
-
-────────────────────────────────────────────────────────────────────────────
-Quick start
-────────────────────────────────────────────────────────────────────────────
-# 1)  Prepare env (CUDA 11.8 example)  ↘
-conda create -n fever_llama3 python=3.10 -y && conda activate fever_llama3
-pip install torch==2.2.2+cu118 -f https://download.pytorch.org/whl/cu118
-pip install transformers==4.40.1 peft==0.10.0 datasets==2.18.0 trl==0.8.6 huggingface_hub==0.22.2
-
-# 2)  Run   (⚠️ **Never** hard‑code your token in notebooks)
-export HF_TOKEN="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"
-python phaseA_llama1b_fever.py \
-       --token "$HF_TOKEN" \
-       --model_id "meta-llama/Llama-3.2-1B-Instruct" \
-       --output_dir ./llama3_phaseA \
-       --batch 16 --grad_acc 2 --epochs 1 --lr 2e-4
-"""
-from __future__ import annotations
-
-import argparse
-import json
-import logging
-import os
-from pathlib import Path
+#!/usr/bin/env python3
+# phaseA_llama_fever.py
+# -----------------------------------------------------------
+# 微调 Llama-3-1B-Instruct 在 FEVER (claim+evidence) 二分类任务
+# -----------------------------------------------------------
+import os, argparse, json, tempfile
 from typing import Dict, List
 
-import torch
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 from huggingface_hub import login as hf_login
-from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from trl import SFTTrainer
 
-logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
-log = logging.getLogger("phaseA")
-
-# ──────────────────────────────────────────────────────────────────────────
-# Prompt templates
-# ──────────────────────────────────────────────────────────────────────────
-SYS = (
-    "<<SYS>>\n"
-    "You are a fact‑checking assistant.\n"
-    "Given EVIDENCE and a CLAIM, reply with exactly one token: SUPPORTED or REFUTED.\n"
-    "Do not output anything else.\n"
-    "<</SYS>>\n\n"
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    TrainingArguments,
 )
-USER_Q = "Question: Is the claim supported or refuted by the evidence?\nAnswer:"
 
-# ──────────────────────────────────────────────────────────────────────────
-# Wikipedia sentence cache (lazy)
-# ──────────────────────────────────────────────────────────────────────────
+from peft import LoraConfig, get_peft_model
+from trl  import SFTTrainer
+
+
+# ------------------------- 数据工具 -------------------------
 class WikiCache:
-    def __init__(self):
-        self._data = load_dataset("fever", "wiki_pages")["wikipedia_pages"]
-        self._title2row = {row["title"]: i for i, row in enumerate(self._data)}
+    """惰性缓存  page_id (标题字符串)  →  {sent_id: sentence_text}"""
+    def __init__(self, cache_dir: str | None = None):
+        wiki = load_dataset("fever", "wiki_pages",
+                            cache_dir=cache_dir)["wikipedia_pages"]
+        # 建立索引：title → 行号
+        self._idx = {row["id"]: i for i, row in enumerate(wiki)}
+        self._data = wiki
         self._cache: Dict[str, Dict[int, str]] = {}
 
-    def sent(self, title: str, sid: int) -> str:
-        if title not in self._cache:
-            rec = self._data[self._title2row[title]]
+    def sent(self, page_id: str, sent_id: int) -> str:
+        if page_id not in self._cache:
+            rec = self._data[self._idx[page_id]]
             sent_map = {
                 int(line.split("\t", 1)[0]): line.split("\t", 1)[1]
                 for line in rec["lines"].split("\n") if line
             }
-            self._cache[title] = sent_map
-        return self._cache[title][sid]
+            self._cache[page_id] = sent_map
+        return self._cache[page_id][sent_id]
 
-WIKI = WikiCache()
 
-# ──────────────────────────────────────────────────────────────────────────
-# Helper to build evidence‑aware prompt
-# ──────────────────────────────────────────────────────────────────────────
-
-def build_prompt(claim: str, ev_groups: List[List[int]]) -> str:
-    group = ev_groups[0]  # first evidence set
-    sents = [WIKI.sent(t[2], t[3]) for t in group][:3]
-    evidence_text = " ".join(sents)
+def build_prompt(sys_msg: str, evidence: str, claim: str) -> str:
     return (
-        f"Evidence: {evidence_text}\n"
+        f"<s>[INST] {sys_msg}\n"
+        f"Evidence: {evidence}\n"
         f"Claim: {claim}\n"
-        f"{USER_Q}"
+        "Question: Is the claim supported or refuted by the evidence?\n"
+        "Answer:[/INST] "
     )
 
-# ──────────────────────────────────────────────────────────────────────────
-# Convert FEVER train → prompt jsonl (binary, NEI removed)
-# ──────────────────────────────────────────────────────────────────────────
 
-def prepare_jsonl(path: Path):
-    if path.exists():
-        log.info("[cache] %s exists", path)
-        return
-    ds = load_dataset("fever", split="train")
-    with path.open("w", encoding="utf-8") as fw:
-        for ex in ds:
-            if ex["label"] == "NOT ENOUGH INFO":
-                continue
-            label = "SUPPORTED" if ex["label"] == "SUPPORTS" else "REFUTED"
-            prompt = build_prompt(ex["claim"], ex["evidence"])
-            inst = f"<s>[INST] {SYS}{prompt} [/INST] {label} </s>"
-            fw.write(json.dumps({"text": inst}) + "\n")
-    log.info("FEVER binary jsonl saved → %s", path)
+def prepare_dataset(keep_nei: bool = False,
+                    cache_dir: str | None = None) -> Dataset:
+    """把 FEVER train 拆分转换成 prompt+label 形式的 Dataset"""
+    raw = load_dataset("fever", split="train", cache_dir=cache_dir)
 
-# ──────────────────────────────────────────────────────────────────────────
-# Build trainer
-# ──────────────────────────────────────────────────────────────────────────
+    wiki = WikiCache(cache_dir)
 
-def build_trainer(cfg) -> SFTTrainer:
-    if cfg.token:
-        hf_login(token=cfg.token)
-    tok = AutoTokenizer.from_pretrained(cfg.model_id, add_eos_token=False, use_fast=False)
-    base = AutoModelForCausalLM.from_pretrained(cfg.model_id, device_map="auto")
+    sys_msg = (
+        "<<SYS>>\n"
+        "You are a fact-checking assistant.\n"
+        "Given EVIDENCE and a CLAIM, reply with exactly one token: "
+        + ("SUPPORTED, REFUTED, or NOT ENOUGH INFO.\n"
+           if keep_nei else
+           "SUPPORTED or REFUTED.\n")
+        + "Do not output anything else.\n"
+        "<</SYS>>"
+    )
 
-    lora = get_peft_model(base, LoraConfig(r=8, lora_alpha=32, target_modules=["q_proj", "v_proj"]))
+    def convert(ex):
+        label = ex["label"]
+        if label == "NOT ENOUGH INFO" and not keep_nei:
+            return None  # 过滤掉 NEI
 
-    train_ds = load_dataset("json", data_files=str(cfg.data_jsonl), split="train")
+        if label == "NOT ENOUGH INFO":
+            ev_text = "No evidence provided."
+            y = "NOT ENOUGH INFO"
+        else:
+            ev_text = wiki.sent(ex["evidence_id"], ex["evidence_sentence_id"])
+            y = "SUPPORTED" if label == "SUPPORTS" else "REFUTED"
 
+        prompt = build_prompt(sys_msg, ev_text, ex["claim"])
+        return {"text": prompt + y + " </s>"}
+
+    ds = raw.map(convert, remove_columns=raw.column_names)
+    ds = ds.filter(lambda x: x is not None)
+    return ds
+
+
+# ------------------------- 训练器 --------------------------
+def build_trainer(args) -> SFTTrainer:
+    # ---- 登录 ----
+    tok_str = args.token or os.getenv("HF_TOKEN")
+    if tok_str:
+        hf_login(tok_str)
+
+    # ---- 模型 & 分词器 ----
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_id, add_eos_token=False, use_fast=False
+    )
+    base = AutoModelForCausalLM.from_pretrained(
+        args.model_id, device_map="auto", torch_dtype="auto"
+    )
+    lora_cfg = LoraConfig(r=8, lora_alpha=32,
+                          target_modules=["q_proj", "v_proj"],
+                          bias="none", lora_dropout=0.05)
+    model = get_peft_model(base, lora_cfg)
+
+    # ---- 数据 ----
+    train_ds = prepare_dataset(args.keep_nei, args.cache_dir)
+
+    # ---- 训练参数 ----
     targs = TrainingArguments(
-        output_dir=cfg.output_dir,
-        per_device_train_batch_size=cfg.batch,
-        gradient_accumulation_steps=cfg.grad_acc,
-        num_train_epochs=cfg.epochs,
-        learning_rate=cfg.lr,
+        output_dir=args.output_dir,
+        per_device_train_batch_size=args.batch,
+        gradient_accumulation_steps=args.grad_acc,
+        num_train_epochs=args.epochs,
+        learning_rate=args.lr,
         warmup_ratio=0.05,
         lr_scheduler_type="cosine",
-        fp16=True,
+        fp16=args.fp16,
+        bf16=args.bf16,
         logging_steps=100,
         save_strategy="epoch",
-        gradient_checkpointing=cfg.grad_ckpt,
+        gradient_checkpointing=args.grad_ckpt,
     )
 
-    return SFTTrainer(model=lora, tokenizer=tok, train_dataset=train_ds, args=targs, max_seq_length=512)
+    return SFTTrainer(
+        model=model,
+        tokenizer=tokenizer,
+        train_dataset=train_ds,
+        max_seq_length=512,
+        args=targs,
+    )
 
-# ──────────────────────────────────────────────────────────────────────────
-# Evaluate on FEVER dev (binary)
-# ──────────────────────────────────────────────────────────────────────────
 
-def evaluate(trainer: SFTTrainer) -> float:
-    dev = load_dataset("fever", split="validation").filter(lambda e: e["label"] != "NOT ENOUGH INFO")
-    correct = 0
-    tok = trainer.tokenizer
-    model = trainer.model
-    for ex in dev:
-        prompt = build_prompt(ex["claim"], ex["evidence"])
-        full = f"<s>[INST] {SYS}{prompt} [/INST]"
-        inp = tok(full, return_tensors="pt").to(model.device)
-        with torch.no_grad():
-            out = model.generate(**inp, max_new_tokens=1)
-        pred = tok.decode(out[0], skip_special_tokens=True).split()[-1].upper()
-        gold = "SUPPORTED" if ex["label"] == "SUPPORTS" else "REFUTED"
-        correct += int(pred == gold)
-    return correct / len(dev)
-
-# ──────────────────────────────────────────────────────────────────────────
-# CLI glue
-# ──────────────────────────────────────────────────────────────────────────
-
-def parse_args():
+# ------------------------- CLI ----------------------------
+def parse_cli():
     p = argparse.ArgumentParser()
-    p.add_argument("--token", default=os.getenv("HF_TOKEN"), help="HuggingFace access token")
     p.add_argument("--model_id", default="meta-llama/Llama-3.2-1B-Instruct")
-    p.add_argument("--output_dir", default="llama3_phaseA")
+    p.add_argument("--token", default=None, help="HF token (或用 HF_TOKEN 环境变量)")
+    p.add_argument("--output_dir", default="./phaseA_llama3")
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--grad_acc", type=int, default=2)
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--grad_ckpt", action="store_true")
+    p.add_argument("--fp16", action="store_true")
+    p.add_argument("--bf16", action="store_true")
+    p.add_argument("--keep_nei", action="store_true",
+                   help="保留 NOT ENOUGH INFO，做三分类")
+    p.add_argument("--cache_dir", default=None,
+                   help="datasets 缓存目录；磁盘紧张时可指定大磁盘路径")
     return p.parse_args()
 
-# ──────────────────────────────────────────────────────────────────────────
-# Main
-# ──────────────────────────────────────────────────────────────────────────
 
-def main():
-    cfg = parse_args()
-    Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
-    cfg.data_jsonl = Path(cfg.output_dir) / "fever_binary_train.jsonl"
-    prepare_jsonl(cfg.data_jsonl)
-
+# ------------------------- MAIN ---------------------------
+if __name__ == "__main__":
+    cfg = parse_cli()
     trainer = build_trainer(cfg)
     trainer.train()
     trainer.save_model(cfg.output_dir)
 
-    acc = evaluate(trainer)
-    log.info("Clean FEVER‑dev accuracy: %.4f", acc)
-    with open(Path(cfg.output_dir) / "metrics.json", "w") as f:
-        json.dump({"clean_dev_accuracy": acc}, f, indent=2)
 
-if __name__ == "__main__":
-    main()
