@@ -21,24 +21,23 @@ from trl  import SFTTrainer
 
 # ------------------------- 数据工具 -------------------------
 class WikiCache:
-    """惰性缓存  page_id (标题字符串)  →  {sent_id: sentence_text}"""
-    def __init__(self, cache_dir: str | None = None):
-        wiki = load_dataset("fever", "wiki_pages",
-                            cache_dir=cache_dir)["wikipedia_pages"]
-        # 建立索引：title → 行号
-        self._idx = {row["id"]: i for i, row in enumerate(wiki)}
+    def __init__(self, cache_dir=None):
+        wiki = load_dataset("fever", "wiki_pages", cache_dir=cache_dir)["wikipedia_pages"]
+        self._idx = {row["id"]: i for i, row in enumerate(wiki)}   # 用字符串键
         self._data = wiki
-        self._cache: Dict[str, Dict[int, str]] = {}
+        self._cache = {}
 
-    def sent(self, page_id: str, sent_id: int) -> str:
-        if page_id not in self._cache:
-            rec = self._data[self._idx[page_id]]
-            sent_map = {
+    def sent(self, page_id, sent_id: int) -> str:
+        page_key = str(page_id)                                    # ←★
+        if page_key not in self._cache:
+            if page_key not in self._idx:
+                return ""  # 页面缺失
+            rec = self._data[self._idx[page_key]]
+            self._cache[page_key] = {
                 int(line.split("\t", 1)[0]): line.split("\t", 1)[1]
                 for line in rec["lines"].split("\n") if line
             }
-            self._cache[page_id] = sent_map
-        return self._cache[page_id][sent_id]
+        return self._cache[page_key].get(sent_id, "")              # 句子缺失→空串
 
 
 def build_prompt(sys_msg: str, evidence: str, claim: str) -> str:
