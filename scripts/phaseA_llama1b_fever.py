@@ -22,6 +22,7 @@ python phaseA_llama1b_fever.py \
        --batch 16 --grad_acc 2 --epochs 1 --lr 2e-4
 """
 from __future__ import annotations
+
 import argparse
 import json
 import logging
@@ -56,7 +57,7 @@ USER_Q = "Question: Is the claim supported or refuted by the evidence?\nAnswer:"
 # ──────────────────────────────────────────────────────────────────────────
 class WikiCache:
     def __init__(self):
-        self._data = load_dataset("fever", "wiki_pages", split="train")
+        self._data = load_dataset("fever", "wiki_pages")["wikipedia_pages"]
         self._title2row = {row["title"]: i for i, row in enumerate(self._data)}
         self._cache: Dict[str, Dict[int, str]] = {}
 
