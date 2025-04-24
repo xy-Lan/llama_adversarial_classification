@@ -54,7 +54,7 @@ def build_prompt(sys_msg: str, evidence: str, claim: str) -> str:
 def prepare_dataset(keep_nei: bool = False,
                     cache_dir: str | None = None) -> Dataset:
     """把 FEVER train 拆分转换成 prompt+label 形式的 Dataset"""
-    raw = load_dataset("fever", split="train", cache_dir=cache_dir)
+    raw = load_dataset("fever", "v1.0", split="train", cache_dir=cache_dir)
 
     wiki = WikiCache(cache_dir)
 
