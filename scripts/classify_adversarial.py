@@ -70,13 +70,13 @@ def construct_prompts(df):
         original_prompt = (
             f"Evidence: {evidence_original.strip()}\n"
             f"Claim: {claim_original.strip()}\n"
-            "Question: Is this claim supported, refuted, or not enough information based on the evidence?\n"
+            "Question: Is this claim supported or refuted based on the evidence?\n"
             "Answer:"
         )
         adversarial_prompt = (
             f"Evidence: {evidence_adversarial.strip()}\n"
             f"Claim: {claim_adversarial.strip()}\n"
-            "Question: Is this claim supported, refuted, or not enough information based on the evidence?\n"
+            "Question: Is this claim supported or or refuted based on the evidence?\n"
             "Answer:"
         )
 
