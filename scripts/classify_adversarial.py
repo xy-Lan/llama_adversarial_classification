@@ -13,7 +13,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
 def load_data(file_path):
     # 加载第401行到最后一行
-    df = pd.read_csv(file_path, skiprows=list(range(1, 51)))
+    # df = pd.read_csv(file_path, skiprows=list(range(1, 51)))
+    df = pd.read_csv(file_path, nrows=50)
     # df = pd.read_csv(file_path)
     return df
 
