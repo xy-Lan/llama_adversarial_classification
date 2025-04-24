@@ -99,6 +99,11 @@ def build_trainer(args) -> SFTTrainer:
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_id, add_eos_token=False, use_fast=False
     )
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+        tokenizer.padding_side = "right"  # 不影响 Llama
     base = AutoModelForCausalLM.from_pretrained(
         args.model_id, device_map="auto", torch_dtype="auto"
     )
