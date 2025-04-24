@@ -13,8 +13,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
 def load_data(file_path):
     # 加载第401行到最后一行
-    # df = pd.read_csv(file_path, skiprows=list(range(1, 101)))
-    df = pd.read_csv(file_path)
+    df = pd.read_csv(file_path, skiprows=list(range(1, 51)))
+    # df = pd.read_csv(file_path)
     return df
 
 
@@ -76,7 +76,7 @@ def construct_prompts(df):
         adversarial_prompt = (
             f"Evidence: {evidence_adversarial.strip()}\n"
             f"Claim: {claim_adversarial.strip()}\n"
-            "Question: Is this claim supported or or refuted based on the evidence?\n"
+            "Question: Is this claim supported or refuted based on the evidence?\n"
             "Answer:"
         )
 
