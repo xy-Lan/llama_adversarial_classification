@@ -132,6 +132,7 @@ def build_trainer(args) -> SFTTrainer:
         train_dataset=train_ds,
         max_seq_length=512,
         args=targs,
+        dataset_text_field="text",
     )
 
 
