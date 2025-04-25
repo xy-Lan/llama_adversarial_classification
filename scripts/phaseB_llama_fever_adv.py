@@ -15,13 +15,14 @@ def load_adv_pairs(path: str, keep_changed: bool = False) -> Dataset:
         df = df[df["agreed_labels"] == 0]          # 只保留语义一致
     df = df.reset_index(drop=True)
 
+    df["pair_id"] = df.index
     def explode(row):
         return {
             "text": [
                 row["original_samples"],  # ← 用 ["col"] 而不是 .col
                 row["adversarial_samples"]
             ],
-            "pair_id": [row["__index_level_0__"], row["__index_level_0__"]],
+            "pair_id": [row["pair_id"], row["pair_id"]],
             "is_adv": [0, 1],
             "semantic": [row["agreed_labels"]] * 2,
             "labels": [-100, -100],
