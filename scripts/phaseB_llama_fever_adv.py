@@ -1,82 +1,114 @@
 #!/usr/bin/env python3
-# Phase B: CE + α·KL 对抗一致性微调
+# phaseB_llama_fever_adv.py  (2025-04-25)
+# -----------------------------------------------------------
+# Phase-B: LoRA 继续微调 —— 交叉熵(CE) + α·KL 对抗一致性
+# 数据：FEVER v1.0 train（去 NEI）＋ 700 对 orig/adv
+# -----------------------------------------------------------
 
-import os, argparse, pandas as pd, torch, torch.nn.functional as F
-from datasets import Dataset, concatenate_datasets, load_dataset
+import os, argparse, pandas as pd, torch
+import torch.nn.functional as F
+from datasets import load_dataset, Dataset, concatenate_datasets
 from transformers import (AutoTokenizer, AutoModelForCausalLM,
                           TrainingArguments, Trainer)
-from peft import PeftModel, LoraConfig, get_peft_model
+from peft import PeftModel
 from huggingface_hub import login as hf_login
 
-# ---------- 1. 解析 CSV ----------
-def load_adv_pairs(path: str, keep_changed: bool = False) -> Dataset:
-    df = pd.read_csv(path)
-    if not keep_changed:
-        df = df[df["agreed_labels"] == 0]          # 只保留语义一致
-    df = df.reset_index(drop=True)
+# ---------- Part 1. 复用 Phase-A 的 WikiCache 与 prompt ----------
+from phaseA_llama1b_fever import WikiCache         # 保证在同目录
+# 若你把 WikiCache 抽到 util.py，请从 util 导入
 
-    df["pair_id"] = df.index
-    def explode(row):
+SYS_MSG = (
+    "<<SYS>>\nYou are a fact-checking assistant.\n"
+    "Given EVIDENCE and a CLAIM, reply with exactly one token: "
+    "SUPPORTED or REFUTED.\nDo not output anything else.\n<</SYS>>"
+)
+
+def build_prompt(evidence: str, claim: str) -> str:
+    return (
+        f"<s>[INST] {SYS_MSG}\n"
+        f"Evidence: {evidence}\n"
+        f"Claim: {claim}\n"
+        "Question: Is the claim supported or refuted by the evidence?\n"
+        "Answer:[/INST] "
+    )
+
+# ---------- Part 2. FEVER → 生成 text 列 + dummy labels ----------
+def get_fever_dataset(cache_dir=None):
+    wiki = WikiCache(cache_dir)
+    raw  = load_dataset("fever", "v1.0", split="train", cache_dir=cache_dir)
+    raw  = raw.filter(lambda x: x["label"] != "NOT ENOUGH INFO")
+
+    def to_prompt(ex):
+        ev = wiki.sent(ex["evidence_id"], ex["evidence_sentence_id"])
+        lab_tok = "SUPPORTED" if ex["label"] == "SUPPORTS" else "REFUTED"
         return {
-            "text": [
-                row["original_samples"],  # ← 用 ["col"] 而不是 .col
-                row["adversarial_samples"]
-            ],
-            "pair_id": [row["pair_id"], row["pair_id"]],
-            "is_adv": [0, 1],
-            "semantic": [row["agreed_labels"]] * 2,
-            "labels": [-100, -100],
+            "text": build_prompt(ev, ex["claim"]) + lab_tok + " </s>",
+            "labels": -100         # Phase-B 不对 FEVER 行算 CE
         }
 
-    return Dataset.from_pandas(df).map(explode, batched=False,
-                                       remove_columns=list(df.columns))
+    return raw.map(
+        to_prompt,
+        remove_columns=raw.column_names,          # 只留下 text + labels
+    )
 
-# ---------- 2. 加载 Phase-A 权重 ----------
-def load_lora_model(base_id: str, phaseA_dir: str, bf16=False, fp16=False):
-    dtype = "bfloat16" if bf16 else ("float16" if fp16 else "float32")
-    base  = AutoModelForCausalLM.from_pretrained(
-                base_id, device_map="auto", torch_dtype=dtype)
-    return PeftModel.from_pretrained(base, phaseA_dir)
+# ---------- Part 3. 700 对 adversarial CSV ----------
+def load_adv_pairs(csv_path: str, keep_changed=False) -> Dataset:
+    df = pd.read_csv(csv_path)
+    if not keep_changed:
+        df = df[df["agreed_labels"] == 0]         # 只留语义保留对
+    df = df.reset_index(drop=True)
 
-# ---------- 3. 自定义 Trainer ----------
+    def explode(row):
+        return {
+            "text":     [row["original_samples"], row["adversarial_samples"]],
+            "pair_id":  [row["index"], row["index"]],
+            "is_adv":   [0, 1],
+            "semantic": [row["agreed_labels"]]*2,
+            "labels":   [-100, -100],             # 对抗对无标签
+        }
+
+    return (
+        Dataset.from_pandas(df, preserve_index=True)  # index 列名为 "index"
+        .map(explode, batched=False,
+             remove_columns=list(df.columns))
+    )
+
+# ---------- Part 4. 自定义 Trainer with CE + α·KL ----------
 class AdvTrainer(Trainer):
-    def __init__(self, alpha=1.0, **kw):
-        super().__init__(**kw)
+    def __init__(self, alpha=1.0, **kwargs):
+        super().__init__(**kwargs)
         self.alpha = alpha
 
     def compute_loss(self, model, inputs, return_outputs=False):
         pair_id  = inputs.pop("pair_id")
-        semantic = inputs.pop("semantic")          # 0 preserve / 1/2 change
-        logits   = model(**inputs).logits[:, -1]   # [B, vocab]
+        semantic = inputs.pop("semantic")
+        logits   = model(**inputs).logits[:, -1]        # 仅最后 token
 
-        # ① 交叉熵 — 只有 FEVER label 样本才有 labels ≠ -100
+        # 1) 主任务 CE — 我们只在 orig 有标签时才算，这里 labels 全为 -100
         labels   = inputs["labels"]
         mask_lbl = labels != -100
-        loss_ce  = (F.cross_entropy(
-                        logits[mask_lbl], labels[mask_lbl]) if mask_lbl.any()
-                    else torch.tensor(0., device=logits.device))
+        loss_ce  = F.cross_entropy(logits[mask_lbl], labels[mask_lbl]) if mask_lbl.any() else 0.
 
-        # ② KL 一致性 — 同 pair 且 semantic == 0
+        # 2) KL 一致性 — 语义保留且成对
         idx_o = torch.arange(0, logits.size(0), 2, device=logits.device)
         idx_a = idx_o + 1
-        same  = (semantic[idx_o] == 0)
+        same  = semantic[idx_o] == 0
+        loss_kl = 0.
         if same.any():
             p = F.log_softmax(logits[idx_o][same], -1)
             q = F.softmax     (logits[idx_a][same], -1)
-            loss_k = F.kl_div(p, q, reduction="batchmean")
-        else:
-            loss_k = torch.tensor(0., device=logits.device)
+            loss_kl = F.kl_div(p, q, reduction="batchmean")
 
-        loss = loss_ce + self.alpha * loss_k
+        loss = loss_ce + self.alpha * loss_kl
         return (loss, logits) if return_outputs else loss
 
-# ---------- 4. CLI ----------
-def cli():
+# ---------- Part 5. CLI & Main ----------
+def get_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base_model", default="meta-llama/Llama-3.2-1B-Instruct")
-    ap.add_argument("--phaseA_dir", default="./phaseA_llama3")
+    ap.add_argument("--base_model", default="meta-llama/Llama-3.2-3B-Instruct")
+    ap.add_argument("--phaseA_dir", default="./phaseA_llama3B")
     ap.add_argument("--pairs_csv", default="./data/train.csv")
-    ap.add_argument("--output_dir", default="./phaseB_llama3")
+    ap.add_argument("--output_dir", default="./phaseB_llama3B")
     ap.add_argument("--alpha", type=float, default=1.0)
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--grad_acc", type=int, default=2)
@@ -85,34 +117,28 @@ def cli():
     ap.add_argument("--fp16", action="store_true")
     ap.add_argument("--bf16", action="store_true")
     ap.add_argument("--token", default=None)
+    ap.add_argument("--cache_dir", default=None)
     return ap.parse_args()
 
-# ---------- MAIN ----------
 if __name__ == "__main__":
-    cfg = cli()
+    cfg = get_args()
     if cfg.token or os.getenv("HF_TOKEN"):
         hf_login(cfg.token or os.getenv("HF_TOKEN"))
 
-    tok = AutoTokenizer.from_pretrained(cfg.base_model, add_eos_token=False,
-                                        use_fast=False)
+    tok = AutoTokenizer.from_pretrained(cfg.base_model, use_fast=False)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
         tok.pad_token_id = tok.eos_token_id
 
-    # 1) FEVER 监督部分
-    fever_train = load_dataset("fever", "v1.0", split="train")
-    fever_train = fever_train.filter(lambda x: x["label"] != "NOT ENOUGH INFO")\
-                             .map(lambda x: {"labels": tok.convert_tokens_to_ids(
-                                  "SUPPORTED" if x["label"]=="SUPPORTS" else "REFUTED")})
-    fever_train = fever_train.remove_columns(
-                       [c for c in fever_train.column_names if c != "text" and c!="labels"])
-    # 2) 对抗对
-    pairs_ds = load_adv_pairs(cfg.pairs_csv)
-    # 3) 混合
-    train_ds = concatenate_datasets([fever_train, pairs_ds])
+    # -------- datasets --------
+    fever_ds  = get_fever_dataset(cfg.cache_dir)
+    pairs_ds  = load_adv_pairs(cfg.pairs_csv)
+    train_ds  = concatenate_datasets([fever_ds, pairs_ds])
 
-    model = load_lora_model(cfg.base_model, cfg.phaseA_dir,
-                            bf16=cfg.bf16, fp16=cfg.fp16)
+    # -------- model with Phase-A LoRA --------
+    base  = AutoModelForCausalLM.from_pretrained(
+        cfg.base_model, device_map="auto", torch_dtype="auto")
+    model = PeftModel.from_pretrained(base, cfg.phaseA_dir)
 
     trainer = AdvTrainer(
         alpha=cfg.alpha,
@@ -128,10 +154,10 @@ if __name__ == "__main__":
             warmup_ratio=0.05,
             fp16=cfg.fp16,
             bf16=cfg.bf16,
-            save_strategy="epoch",
             logging_steps=50,
-        ),
+            save_strategy="epoch",
+        )
     )
-
     trainer.train()
     trainer.save_model(cfg.output_dir)
+
