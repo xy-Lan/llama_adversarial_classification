@@ -59,9 +59,10 @@ def load_adv_pairs(csv_path: str, keep_changed=False) -> Dataset:
     df = df.reset_index(drop=True)
 
     def explode(row):
+        pid = row["__index_level_0__"]
         return {
             "text":     [row["original_samples"], row["adversarial_samples"]],
-            "pair_id":  [row["index"], row["index"]],
+            "pair_id":  [pid, pid],
             "is_adv":   [0, 1],
             "semantic": [row["agreed_labels"]]*2,
             "labels":   [-100, -100],             # 对抗对无标签
