@@ -12,7 +12,7 @@ model = PeftModel.from_pretrained(base, LORA).merge_and_unload()
 model.eval()
 
 # ---------- prepare dev set ----------
-dev = load_dataset("fever", "v1.0", split="validation")
+dev = load_dataset("fever", "v1.0", split="labelled_dev")
 dev = dev.filter(lambda r: r["label"] != "NOT ENOUGH INFO")
 
 def to_prompt(r):
