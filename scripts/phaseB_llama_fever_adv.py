@@ -134,6 +134,26 @@ if __name__ == "__main__":
     pairs_ds  = load_adv_pairs(cfg.pairs_csv)
     train_ds  = concatenate_datasets([fever_ds, pairs_ds])
 
+
+    # ========== ① 在这里：先 tokenization，然后打印一个样本 ==========
+    def tok_fn(batch):
+        out = tok(batch["text"],
+                  truncation=True,
+                  padding=False)  # 让 DataCollatorWithPadding 再统一 pad
+        out["labels"] = batch["labels"]  # 把原 label 搬过来
+        # 其余自定义字段原样保留
+        for fld in ("pair_id", "semantic", "is_adv"):
+            if fld in batch:
+                out[fld] = batch[fld]
+        return out
+
+    train_ds = train_ds.map(tok_fn, batched=True, remove_columns=["text"])
+
+    # —— 快速调试：看第一条样本结构 ——
+    from itertools import islice
+
+    print("⟹ 调试样本:", next(islice(train_ds, 0, 1)))
+
     # -------- model with Phase-A LoRA --------
     base  = AutoModelForCausalLM.from_pretrained(
         cfg.base_model, device_map="auto", torch_dtype="auto")
