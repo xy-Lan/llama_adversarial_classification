@@ -17,11 +17,14 @@ def load_adv_pairs(path: str, keep_changed: bool = False) -> Dataset:
 
     def explode(row):
         return {
-            "text":      [row.original_samples, row.adversarial_samples],
-            "pair_id":   [row.name, row.name],     # 行号作 id
-            "is_adv":    [0, 1],
-            "semantic":  [row.agreed_labels]*2,    # 0 or 1/2
-            "labels":    [-100, -100],             # 无监督
+            "text": [
+                row["original_samples"],  # ← 用 ["col"] 而不是 .col
+                row["adversarial_samples"]
+            ],
+            "pair_id": [row["__index_level_0__"], row["__index_level_0__"]],
+            "is_adv": [0, 1],
+            "semantic": [row["agreed_labels"]] * 2,
+            "labels": [-100, -100],
         }
 
     return Dataset.from_pandas(df).map(explode, batched=False,
