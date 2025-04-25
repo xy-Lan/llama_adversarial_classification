@@ -42,7 +42,10 @@ def get_fever_dataset(cache_dir=None):
         lab_tok = "SUPPORTED" if ex["label"] == "SUPPORTS" else "REFUTED"
         return {
             "text": build_prompt(ev, ex["claim"]) + lab_tok + " </s>",
-            "labels": -100         # Phase-B 不对 FEVER 行算 CE
+            "labels": -100,         # Phase-B 不对 FEVER 行算 CE
+            "pair_id": -1,  # 单独样本，用 -1 占位
+            "semantic": 1,  # 1 表示“不要求对齐”，compute_loss 时 same==0 才算 KL
+            "is_adv": 0,  # 0=orig，1=adv，可随意
         }
 
     return raw.map(
