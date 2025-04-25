@@ -6,7 +6,7 @@
 # -----------------------------------------------------------
 import os, argparse, pandas as pd, torch
 import torch.nn.functional as F
-from datasets import load_dataset, Dataset, concatenate_datasets
+from datasets import load_dataset, Dataset, concatenate_datasets, Value
 from transformers import (AutoTokenizer, AutoModelForCausalLM,
                           TrainingArguments, Trainer)
 from peft import PeftModel
@@ -134,7 +134,7 @@ if __name__ == "__main__":
 
     # -------- datasets --------
     pairs_ds  = load_adv_pairs(cfg.pairs_csv)
-    pairs_ds = pairs_ds.cast_column("semantic", "int64")  # float → int
+    pairs_ds = pairs_ds.cast_column("semantic", Value("int64"))  # float → int
     fever_ds = get_fever_dataset(cfg.cache_dir)
     fever_ds = fever_ds.add_column("semantic",
                                    [0] * len(fever_ds),  # 全填 0
