@@ -136,15 +136,15 @@ if __name__ == "__main__":
     pairs_ds  = load_adv_pairs(cfg.pairs_csv)
     pairs_ds = pairs_ds.cast_column("semantic", Value("int64"))  # float → int
     fever_ds = get_fever_dataset(cfg.cache_dir)
-    fever_ds = fever_ds.add_column("semantic",
-                                   [0] * len(fever_ds),  # 全填 0
-                                   dtype="int64")
-    fever_ds = fever_ds.add_column("is_adv",
-                                   [0] * len(fever_ds),  # orig 标 0
-                                   dtype="int64")
-    fever_ds = fever_ds.add_column("pair_id",
-                                   list(range(len(fever_ds))),
-                                   dtype="int64")
+    fever_ds = fever_ds.add_column("semantic", [0] * len(fever_ds))
+    fever_ds = fever_ds.add_column("is_adv", [0] * len(fever_ds))
+    fever_ds = fever_ds.add_column("pair_id", list(range(len(fever_ds))))
+
+    # 可选：显式强制 dtypes
+    fever_ds = fever_ds.cast_column("semantic", Value("int64"))
+    fever_ds = fever_ds.cast_column("is_adv", Value("int64"))
+    fever_ds = fever_ds.cast_column("pair_id", Value("int64"))
+
     train_ds  = concatenate_datasets([fever_ds, pairs_ds])
 
 
