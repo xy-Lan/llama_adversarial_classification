@@ -105,10 +105,10 @@ class AdvTrainer(Trainer):
 # ---------- Part 5. CLI & Main ----------
 def get_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base_model", default="meta-llama/Llama-3.2-3B-Instruct")
-    ap.add_argument("--phaseA_dir", default="./phaseA_llama3B")
+    ap.add_argument("--base_model", default="meta-llama/Llama-3.2-1B-Instruct")
+    ap.add_argument("--phaseA_dir", default="./phaseA_llama3")
     ap.add_argument("--pairs_csv", default="./data/train.csv")
-    ap.add_argument("--output_dir", default="./phaseB_llama3B")
+    ap.add_argument("--output_dir", default="./phaseB_llama3")
     ap.add_argument("--alpha", type=float, default=1.0)
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--grad_acc", type=int, default=2)
