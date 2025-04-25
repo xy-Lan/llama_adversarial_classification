@@ -24,7 +24,7 @@ def load_adv_pairs(path: str, keep_changed: bool = False) -> Dataset:
             "labels":    [-100, -100],             # 无监督
         }
 
-    return Dataset.from_pandas(df).map(explode, batched=True,
+    return Dataset.from_pandas(df).map(explode, batched=False,
                                        remove_columns=list(df.columns))
 
 # ---------- 2. 加载 Phase-A 权重 ----------

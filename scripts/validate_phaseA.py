@@ -4,8 +4,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 from phaseA_llama1b_fever import WikiCache
 
-BASE = "meta-llama/Llama-3.2-1B-Instruct"          # 换成 1B / 8B 亦可
-LORA = "./phaseA_llama3"                            # 你的输出目录
+BASE = "meta-llama/Llama-3.2-1B-Instruct"  # 换成 1B / 8B 亦可
+LORA = "./phaseA_llama3"  # 你的输出目录
 
 tok = AutoTokenizer.from_pretrained(BASE, use_fast=False)
 base = AutoModelForCausalLM.from_pretrained(BASE, device_map="auto")
@@ -18,6 +18,7 @@ dev = dev.filter(lambda r: r["label"] != "NOT ENOUGH INFO")
 
 wiki = WikiCache()
 
+
 def to_prompt(r):
     evid = wiki.sent(r["evidence_id"], r["evidence_sentence_id"])
     return (
@@ -26,22 +27,27 @@ def to_prompt(r):
         "Question: Is this claim supported or refuted by the evidence?\n"
         "Answer:"
     )
+
+
 prompts = list(map(to_prompt, dev))
-gold    = ["SUPPORTED" if l=="SUPPORTS" else "REFUTED" for l in dev["label"]]
+gold = ["SUPPORTED" if l == "SUPPORTS" else "REFUTED" for l in dev["label"]]
+
 
 # ---------- batched prediction ----------
 @torch.no_grad()
-def predict(ps, bs=16):
+def batch_predict(prompts, bs=64):
     preds = []
-    for i in range(0, len(ps), bs):
-        sub = tok(ps[i:i+bs], padding=True,
-                  truncation=True, max_length=512,
-                  return_tensors="pt").to(model.device)
-        out = model.generate(**sub, max_new_tokens=1)
-        preds += [tok.decode(o, skip_special_tokens=True).split()[0].upper()
-                  for o in out]
+    for i in range(0, len(prompts), bs):
+        sub = tok(prompts[i:i + bs], padding=True, truncation=True,
+                  max_length=512, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            logits = model(**sub).logits[:, -1]  # 不用 generate
+        idx = logits.argmax(-1).tolist()
+        preds += ["SUPPORTED" if j == tok.convert_tokens_to_ids('SUPPORTED') else "REFUTED"
+                  for j in idx]
     return preds
 
-pred = predict(prompts)
-acc  = sum(p==g for p,g in zip(pred, gold)) / len(gold)
-print(f"Clean dev Accuracy: {acc*100:.2f}%   ({acc*len(gold)}/{len(gold)})")
+
+pred = batch_predict(prompts)
+acc = sum(p == g for p, g in zip(pred, gold)) / len(gold)
+print(f"Clean dev Accuracy: {acc * 100:.2f}%   ({acc * len(gold)}/{len(gold)})")
