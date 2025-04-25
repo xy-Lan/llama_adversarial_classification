@@ -25,7 +25,7 @@ def load_adv_pairs(path: str, keep_changed: bool = False) -> Dataset:
         }
 
     return Dataset.from_pandas(df).map(explode, batched=True,
-                                       remove_columns=df.columns)
+                                       remove_columns=list(df.columns))
 
 # ---------- 2. 加载 Phase-A 权重 ----------
 def load_lora_model(base_id: str, phaseA_dir: str, bf16=False, fp16=False):
