@@ -4,7 +4,6 @@
 # Phase-B: LoRA 继续微调 —— 交叉熵(CE) + α·KL 对抗一致性
 # 数据：FEVER v1.0 train（去 NEI）＋ 700 对 orig/adv
 # -----------------------------------------------------------
-
 import os, argparse, pandas as pd, torch
 import torch.nn.functional as F
 from datasets import load_dataset, Dataset, concatenate_datasets
@@ -58,21 +57,29 @@ def load_adv_pairs(csv_path: str, keep_changed=False) -> Dataset:
         df = df[df["agreed_labels"] == 0]         # 只留语义保留对
     df = df.reset_index(drop=True)
 
-    def explode(row):
-        pid = row["__index_level_0__"]
-        return {
-            "text":     [row["original_samples"], row["adversarial_samples"]],
-            "pair_id":  [pid, pid],
-            "is_adv":   [0, 1],
-            "semantic": [row["agreed_labels"]]*2,
-            "labels":   [-100, -100],             # 对抗对无标签
-        }
+    def explode(batch):
+        # batch 是字典，value 是同长度 list
+        out = {"text": [], "pair_id": [], "is_adv": [],
+               "semantic": [], "labels": []}
+        for i, (orig, adv, sem) in enumerate(
+                zip(batch["original_samples"],
+                    batch["adversarial_samples"],
+                    batch["agreed_labels"])):
+            pid = batch["__index_level_0__"][i]
+            out["text"] += [orig, adv]  # 每条写成标量
+            out["pair_id"] += [pid, pid]
+            out["is_adv"] += [0, 1]
+            out["semantic"] += [sem, sem]
+            out["labels"] += [-100, -100]
+        return out
 
-    return (
-        Dataset.from_pandas(df, preserve_index=True)  # index 列名为 "index"
-        .map(explode, batched=False,
+    pairs_ds = (
+        Dataset.from_pandas(df, preserve_index=True)
+        .map(explode, batched=True,  # ← 改回 True
              remove_columns=list(df.columns))
     )
+
+    return pairs_ds
 
 # ---------- Part 4. 自定义 Trainer with CE + α·KL ----------
 class AdvTrainer(Trainer):
