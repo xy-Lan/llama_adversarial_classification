@@ -2,6 +2,7 @@ import torch, torch.nn.functional as F
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
+from phaseA_llama1b_fever import WikiCache
 
 BASE = "meta-llama/Llama-3.2-1B-Instruct"          # 换成 1B / 8B 亦可
 LORA = "./phaseA_llama3"                            # 你的输出目录
@@ -15,10 +16,12 @@ model.eval()
 dev = load_dataset("fever", "v1.0", split="labelled_dev")
 dev = dev.filter(lambda r: r["label"] != "NOT ENOUGH INFO")
 
+wiki = WikiCache()
+
 def to_prompt(r):
-    evidence = r["evidence"]
+    evid = wiki.sent(r["evidence_id"], r["evidence_sentence_id"])
     return (
-        f"Evidence: {evidence}\n"
+        f"Evidence: {evid}\n"
         f"Claim: {r['claim']}\n"
         "Question: Is this claim supported or refuted by the evidence?\n"
         "Answer:"
