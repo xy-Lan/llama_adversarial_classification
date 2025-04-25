@@ -54,32 +54,23 @@ def get_fever_dataset(cache_dir=None):
 def load_adv_pairs(csv_path: str, keep_changed=False) -> Dataset:
     df = pd.read_csv(csv_path)
     if not keep_changed:
-        df = df[df["agreed_labels"] == 0]         # 只留语义保留对
-    df = df.reset_index(drop=True)
+        df = df[df["agreed_labels"] == 0]
 
-    def explode(batch):
-        # batch 是字典，value 是同长度 list
-        out = {"text": [], "pair_id": [], "is_adv": [],
-               "semantic": [], "labels": []}
-        for i, (orig, adv, sem) in enumerate(
-                zip(batch["original_samples"],
-                    batch["adversarial_samples"],
-                    batch["agreed_labels"])):
-            pid = batch["__index_level_0__"][i]
-            out["text"] += [orig, adv]  # 每条写成标量
-            out["pair_id"] += [pid, pid]
-            out["is_adv"] += [0, 1]
-            out["semantic"] += [sem, sem]
-            out["labels"] += [-100, -100]
-        return out
+    # -------- 用 pandas 直接展开成两倍行数 --------
+    df_orig = df[["original_samples", "agreed_labels"]].copy()
+    df_orig.columns = ["text", "semantic"]
+    df_orig["is_adv"] = 0
 
-    pairs_ds = (
-        Dataset.from_pandas(df, preserve_index=True)
-        .map(explode, batched=True,  # ← 改回 True
-             remove_columns=list(df.columns))
-    )
+    df_adv  = df[["adversarial_samples", "agreed_labels"]].copy()
+    df_adv.columns = ["text", "semantic"]
+    df_adv["is_adv"] = 1
 
-    return pairs_ds
+    big = pd.concat([df_orig, df_adv], ignore_index=True)
+    big["pair_id"] = big.index // 2         # 相同对同一个 id
+    big["labels"]  = -100
+
+    # 直接转 Dataset（全部列长度一致）
+    return Dataset.from_pandas(big, preserve_index=False)
 
 # ---------- Part 4. 自定义 Trainer with CE + α·KL ----------
 class AdvTrainer(Trainer):
