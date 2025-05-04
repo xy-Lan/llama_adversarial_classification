@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# phaseA_llama_fever.py
+# phaseA_llama3b_fever.py
 # -----------------------------------------------------------
 # 微调 Llama-3-1B-Instruct 在 FEVER (claim+evidence) 二分类任务
 # -----------------------------------------------------------
@@ -22,7 +22,7 @@ from trl  import SFTTrainer
 # ------------------------- 数据工具 -------------------------
 class WikiCache:
     def __init__(self, cache_dir=None):
-        wiki = load_dataset("fever", "wiki_pages", cache_dir=cache_dir)["wikipedia_pages"]
+        wiki = load_dataset("fever", "wiki_pages", cache_dir=cache_dir, trust_remote_code=True)["wikipedia_pages"]
         self._idx = {row["id"]: i for i, row in enumerate(wiki)}   # 用字符串键
         self._data = wiki
         self._cache = {}
