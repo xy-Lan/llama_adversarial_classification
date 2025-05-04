@@ -22,7 +22,7 @@ from trl  import SFTTrainer
 # ------------------------- 数据工具 -------------------------
 class WikiCache:
     def __init__(self, cache_dir=None):
-        wiki = load_dataset("fever", "wiki_pages", cache_dir=cache_dir, trust_remote_code=True)["wikipedia_pages"]
+        wiki = load_dataset("fever", "wiki_pages", cache_dir=cache_dir, trust_remote_code=True, download_mode="force_redownload")["wikipedia_pages"]
         self._idx = {row["id"]: i for i, row in enumerate(wiki)}   # 用字符串键
         self._data = wiki
         self._cache = {}
