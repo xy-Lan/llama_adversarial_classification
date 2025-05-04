@@ -34,7 +34,7 @@ def build_prompt(evidence: str, claim: str) -> str:
 # ---------- Part 2. FEVER → 生成 text 列 + dummy labels ----------
 def get_fever_dataset(cache_dir=None):
     wiki = WikiCache(cache_dir)
-    raw  = load_dataset("fever", "v1.0", split="train", cache_dir=cache_dir)
+    raw  = load_dataset("fever", "v1.0", split="train", cache_dir=cache_dir, trust_remote_code=True)
     raw  = raw.filter(lambda x: x["label"] != "NOT ENOUGH INFO")
 
     def to_prompt(ex):
