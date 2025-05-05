@@ -68,7 +68,7 @@ def construct_prompts(df):
     return original_prompts, adversarial_prompts, skipped_samples, valid_samples
 
 
-def load_model(model_name="meta-llama/Llama-3.2-8B-Instruct", token=None):
+def load_model(model_name="meta-llama/Llama-3.2-3B-Instruct", token=None):
     """加载语言模型和tokenizer"""
     print("Loading model...")
 
@@ -323,7 +323,7 @@ def main():
     """主函数"""
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='LLama分类器评估对抗性示例')
-    parser.add_argument('--model', type=str, default="meta-llama/Llama-3.2-1B-Instruct", help='模型名称')
+    parser.add_argument('--model', type=str, default="meta-llama/Llama-3.2-3B-Instruct", help='模型名称')
     parser.add_argument('--token', type=str, default=None, help='HuggingFace token')
     parser.add_argument('--batch_size', type=int, default=32, help='批处理大小')
     parser.add_argument('--data_path', type=str, default='./data/adversarial_dataset_corrected.csv', help='数据集路径')
