@@ -141,7 +141,7 @@ if __name__ == "__main__":
         # 保留其他字段
         for key in ["pair_id", "semantic", "is_adv"]:
             if key in examples:
-                tokens[key] = examples[key]
+                tokens[key] = list(examples[key])
         return tokens
 
 
@@ -156,6 +156,7 @@ if __name__ == "__main__":
         columns=["input_ids", "attention_mask", "labels",
                  "pair_id", "semantic", "is_adv"]
     )
+    print("Example keys after tokenization:", train_ds[0].keys())
 
     # Sanity‑check
     assert all("pair_id" in row for row in train_ds)
