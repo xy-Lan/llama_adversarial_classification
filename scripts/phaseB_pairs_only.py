@@ -64,6 +64,7 @@ class AdvTrainer(Trainer):
         self.alpha = alpha
 
     def compute_loss(self, model, inputs, return_outputs=False):
+        print(">> DEBUG: entered compute_loss 进入！！！！")
         print(">> DEBUG: inside compute_loss; id=", id(self))
 
         # ----- 取出自定义字段 -----
