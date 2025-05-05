@@ -11,6 +11,8 @@ from transformers import (AutoTokenizer, AutoModelForCausalLM,
                           TrainingArguments, Trainer)
 from peft import PeftModel
 from huggingface_hub import login as hf_login
+from transformers import DataCollatorWithPadding
+
 
 # ---------- Part 1. 复用 Phase-A 的 WikiCache 与 prompt ----------
 from phaseA_llama1b_fever import WikiCache         # 保证在同目录
@@ -152,6 +154,7 @@ if __name__ == "__main__":
     # ★ 先按 pair_id→is_adv 排序，让 0=orig, 1=adv 紧邻
     train_ds = train_ds.sort(["pair_id", "is_adv"])
 
+    collator = DataCollatorWithPadding(tokenizer=tok, return_tensors="pt")  # ★
 
     # ========== ① 在这里：先 tokenization，然后打印一个样本 ==========
     def tok_fn(batch):
@@ -184,6 +187,7 @@ if __name__ == "__main__":
         model=model,
         tokenizer=tok,
         train_dataset=train_ds,
+        data_collator=collator,
         args=TrainingArguments(
             output_dir=cfg.output_dir,
             per_device_train_batch_size=cfg.batch,
