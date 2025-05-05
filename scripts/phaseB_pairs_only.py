@@ -64,23 +64,21 @@ class AdvTrainer(Trainer):
         self.alpha = alpha
 
     def compute_loss(self, model, inputs, return_outputs=False):
-        pair_id  = inputs.pop("pair_id")
+        pair_id = inputs.pop("pair_id")
         semantic = inputs.pop("semantic")
-        logits   = model(**inputs).logits[:, -1]       # 只取最后一个 token
 
-        # 1) Cross‑entropy（此处 labels 全为 -100，可跳过）
-        labels   = inputs["labels"]
-        mask_lbl = labels != -100
-        loss_ce  = F.cross_entropy(logits[mask_lbl], labels[mask_lbl]) if mask_lbl.any() else 0.
+        logits = model(**inputs).logits[:, -1]  # 仍只拿最后一个 token
 
-        # 2) KL：同一 pair、semantic==0 时计算
+        loss_ce = 0.0  # ‹—— 直接设 0
+
+        # ===== KL 部分保持不变 =====
         idx_o = torch.arange(0, logits.size(0), 2, device=logits.device)
         idx_a = idx_o + 1
-        same  = semantic[idx_o] == 0
-        loss_kl = 0.
+        same = semantic[idx_o] == 0
+        loss_kl = 0.0
         if same.any():
             p = F.log_softmax(logits[idx_o][same], -1)
-            q = F.softmax     (logits[idx_a][same], -1)
+            q = F.softmax(logits[idx_a][same], -1)
             loss_kl = F.kl_div(p, q, reduction="batchmean")
 
         loss = loss_ce + self.alpha * loss_kl
