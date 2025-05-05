@@ -102,13 +102,77 @@ def load_model(model_name: str, token: str | None):
 def classify(prompts, tokenizer, model, batch_size=32):
     device = next(model.parameters()).device
 
-    # --- derive token ids for the two labels (may be multi‑token)
     allow_ids = []
     for lbl in ("SUPPORTED", "REFUTED"):
         tid = tokenizer.convert_tokens_to_ids(lbl)
-        if tid is None:  # label is split into multiple tokens → take first sub‑token id
+        if tid is None:
             tid = tokenizer(lbl, add_special_tokens=False)["input_ids"][0]
         allow_ids.append(tid)
+
+    logits_proc = LogitsProcessorList([TwoLabelLimiter(allow_ids)])
+    print("调试Allowed label token ids:", allow_ids)
+
+    preds = []
+    for start in range(0, len(prompts), batch_size):
+        batch = prompts[start:start+batch_size]
+        enc = tokenizer(batch, padding=True, return_tensors="pt").to(device)
+        with torch.no_grad():
+            outs = model.generate(
+                **enc,
+                max_new_tokens=1,
+                temperature=0.0,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+                logits_processor=logits_proc,
+            )
+        inp_len = enc["input_ids"].shape[1]
+        for o in outs:
+            tok_id = o[inp_len].item()  # 只取新 token
+            preds.append("SUPPORTED" if tok_id == allow_ids[0] else "REFUTED")
+    return preds
+
+############################################
+# -------------  Metrics  ---------------- #
+############################################
+
+def evaluate(df, orig_preds, adv_preds, skipped, valid):
+    sdf = df.drop(index=skipped).reset_index(drop=True)
+    sdf["orig"], sdf["adv"] = orig_preds, adv_preds
+    sdf["flip"] = sdf["orig"] != sdf["adv"]
+    sdf["correct"] = sdf["orig"] == sdf["correctness"].str.upper()
+    print("Clean acc:", f"{sdf['correct'].mean():.2%}")
+    print("Flip rate:", f"{sdf['flip'].sum()/valid:.2%}")
+    return sdf
+
+############################################
+# ---------------- main ------------------ #
+############################################
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default="meta-llama/Llama-3.2-3B-Instruct")
+    ap.add_argument("--token")
+    ap.add_argument("--csv", default="./data/adversarial_dataset_corrected.csv")
+    ap.add_argument("--batch", type=int, default=32)
+    args = ap.parse_args()
+
+    df = load_data(args.csv)
+    orig, adv, skipped, valid = construct_prompts(df)
+    tok, mdl = load_model(args.model, args.token)
+
+    print("\nOriginal prompts …")
+    o_preds = classify(orig, tok, mdl, args.batch)
+
+    print("\nAdversarial prompts …")
+    a_preds = classify(adv, tok, mdl, args.batch)
+
+    evaluate(df, o_preds, a_preds, skipped, valid)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
 
 
 
