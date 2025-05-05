@@ -67,19 +67,23 @@ class AdvTrainer(Trainer):
         pair_id = inputs.pop("pair_id")
         semantic = inputs.pop("semantic")
 
-        logits = model(**inputs).logits[:, -1]  # 仍只拿最后一个 token
+        # --- forward ---
+        logits = model(**inputs).logits[:, -1]  # [B, vocab]
 
-        loss_ce = 0.0  # ‹—— 直接设 0
+        # ===== 1) Cross‑entropy：此版本直接跳过 =====
+        loss_ce = logits.new_tensor(0.0)  # ⚑ 必须是 tensor
 
-        # ===== KL 部分保持不变 =====
+        # ===== 2) KL：同一 pair 且 semantic==0 才算 =====
         idx_o = torch.arange(0, logits.size(0), 2, device=logits.device)
         idx_a = idx_o + 1
         same = semantic[idx_o] == 0
-        loss_kl = 0.0
+
         if same.any():
             p = F.log_softmax(logits[idx_o][same], -1)
             q = F.softmax(logits[idx_a][same], -1)
             loss_kl = F.kl_div(p, q, reduction="batchmean")
+        else:
+            loss_kl = logits.new_tensor(0.0)  # ⚑ 仍然是 tensor
 
         loss = loss_ce + self.alpha * loss_kl
         return (loss, logits) if return_outputs else loss
