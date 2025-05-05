@@ -45,6 +45,9 @@ def adv_collator(features):
 
     # ✅ 在这里定义改进的 stack 函数
     def stack(name):
+        for i, f in enumerate(features):
+            if name not in f:
+                print(f"[DEBUG] Sample {i} is missing field '{name}'. Available keys: {list(f.keys())}")
         values = [f[name] for f in features if name in f]
         if len(values) < len(features):
             raise ValueError(f"Some samples in the batch are missing the '{name}' field.")
