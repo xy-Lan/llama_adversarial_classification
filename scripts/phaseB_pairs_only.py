@@ -93,8 +93,8 @@ class AdvTrainer(Trainer):
         loss = dummy + loss_ce + self.alpha * loss_kl
 
         # ========= 这里插入调试 =========
-        print("   logits.requires_grad =", logits.requires_grad)
-        print("   loss.requires_grad   =", loss.requires_grad)
+        # print("   logits.requires_grad =", logits.requires_grad)
+        # print("   loss.requires_grad   =", loss.requires_grad)
         # =================================
 
         return (loss, logits) if return_outputs else loss
@@ -168,7 +168,7 @@ if __name__ == "__main__":
         columns=["input_ids", "attention_mask", "labels",
                  "pair_id", "semantic", "is_adv"]
     )
-    print("Example keys after tokenization:", train_ds[0].keys())
+    # print("Example keys after tokenization:", train_ds[0].keys())
 
     required_fields = ["input_ids", "attention_mask", "labels", "pair_id", "semantic", "is_adv"]
     train_ds = train_ds.filter(lambda ex: all(k in ex and ex[k] is not None for k in required_fields))
@@ -209,10 +209,13 @@ if __name__ == "__main__":
             warmup_ratio=0.05,
             fp16=cfg.fp16,
             bf16=cfg.bf16,
-            logging_steps=20,
-            save_strategy="epoch",
-            dataloader_drop_last=True,      # batch 必须偶数
-            remove_unused_columns=False  # ←★ 保留自定义字段
+            logging_dir=f"{cfg.output_dir}/logs",  # ← 日志路径
+            logging_strategy="steps",  # ← 每多少步记录一次
+            logging_steps=10,  # ← 每 10 步记录一次
+            save_strategy="epoch",  # ← 每个 epoch 保存一次
+            save_total_limit=1,  # ← 只保留最近一次（可选）
+            dataloader_drop_last=True,
+            remove_unused_columns=False  # ← 保留自定义字段
         )
     )
 
@@ -220,3 +223,5 @@ if __name__ == "__main__":
     trainer.train()
     trainer.save_model(cfg.output_dir)
     print(f"✅ Phase B 权重已保存到：{cfg.output_dir}")
+    save_strategy = "epoch"
+    save_total_limit = 1
