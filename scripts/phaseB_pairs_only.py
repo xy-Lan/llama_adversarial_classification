@@ -13,45 +13,47 @@ from transformers import (AutoTokenizer, AutoModelForCausalLM,
 from peft import PeftModel
 from torch.nn.utils.rnn import pad_sequence
 
-# ➊ 读 CSV → 展开成 2×行
-def load_pairs(csv_path):
-    df = pd.read_csv(csv_path)[["original_samples", "adversarial_samples"]]
-    df_orig = df["original_samples"].to_frame("text");    df_orig["is_adv"] = 0
-    df_adv  = df["adversarial_samples"].to_frame("text"); df_adv["is_adv"] = 1
+# ========== 1. CSV → Dataset ==========
+def load_adv_pairs(csv_path: str, keep_changed=False) -> Dataset:
+    """读取 pairs CSV 并展开为 2×行：
+       - original_samples → is_adv=0
+       - adversarial_samples → is_adv=1
+    """
+    df = pd.read_csv(csv_path)
+    if not keep_changed:
+        df = df[df["agreed_labels"] == 0]
+
+    df_orig = df[["original_samples", "agreed_labels"]].copy()
+    df_orig.columns = ["text", "semantic"]           # semantic: 0=相同，1=不同
+    df_orig["is_adv"] = 0
+
+    df_adv = df[["adversarial_samples", "agreed_labels"]].copy()
+    df_adv.columns = ["text", "semantic"]
+    df_adv["is_adv"] = 1
+
     big = pd.concat([df_orig, df_adv], ignore_index=True)
-    big["pair_id"]  = big.index // 2
-    big["semantic"] = 0         # 0=语义一致
-    big["labels"]   = -100
+    big["pair_id"] = big.index // 2                  # 同一对共享 id
+    big["labels"]  = -100                            # Phase B 不算 CE
     return Dataset.from_pandas(big, preserve_index=False)
 
-pairs_ds = load_pairs("./data/train.csv").cast_column("pair_id", Value("int64"))
-
-# ➋ tokenisation
-tok = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct", use_fast=False)
-def tok_fn(b):
-    enc = tok(b["text"], truncation=True, padding=False)
-    enc["labels"]   = b["labels"]
-    enc["pair_id"]  = b["pair_id"]
-    enc["semantic"] = b["semantic"]
-    enc["is_adv"]   = b["is_adv"]
-    return enc
-
-pairs_ds = pairs_ds.map(tok_fn, batched=True, remove_columns=["text"],
-                        load_from_cache_file=False).set_format(
-            type="torch",
-            columns=["input_ids","attention_mask","labels",
-                     "pair_id","semantic","is_adv"])
-
-# ➌ collator（动态 pad）
+# ========== 2. Data collator ==========
 def adv_collator(features):
+    input_ids = [torch.tensor(f["input_ids"]) for f in features]
     pad_id = tok.pad_token_id
-    input_ids = pad_sequence([f["input_ids"] for f in features],
-                             batch_first=True, padding_value=pad_id)
-    attn = (input_ids != pad_id).long()
-    to_t = lambda k: torch.tensor([f[k] for f in features])
-    return {"input_ids":input_ids, "attention_mask":attn,
-            "labels":to_t("labels"), "pair_id":to_t("pair_id"),
-            "semantic":to_t("semantic"), "is_adv":to_t("is_adv")}
+    input_ids = pad_sequence(input_ids, batch_first=True, padding_value=pad_id)
+    attention_mask = (input_ids != pad_id).long()
+
+    def stack(name):                                   # 不再担心缺列
+        return torch.tensor([f[name] for f in features])
+
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "labels": stack("labels"),
+        "pair_id": stack("pair_id"),
+        "semantic": stack("semantic"),
+        "is_adv": stack("is_adv"),
+    }
 
 # ========== 3. 自定义 Trainer ==========
 class AdvTrainer(Trainer):
