@@ -136,9 +136,11 @@ if __name__ == "__main__":
     pairs_ds  = load_adv_pairs(cfg.pairs_csv)
     pairs_ds = pairs_ds.cast_column("semantic", Value("int64"))  # float → int
     fever_ds = get_fever_dataset(cfg.cache_dir)
-    fever_ds = fever_ds.add_column("semantic", [0] * len(fever_ds))
-    fever_ds = fever_ds.add_column("is_adv", [0] * len(fever_ds))
-    fever_ds = fever_ds.add_column("pair_id", list(range(len(fever_ds))))
+    # 只添加不存在的列，避免重复
+    if "is_adv" not in fever_ds.column_names:
+        fever_ds = fever_ds.add_column("is_adv", [0] * len(fever_ds))
+    if "pair_id" not in fever_ds.column_names:
+        fever_ds = fever_ds.add_column("pair_id", list(range(len(fever_ds))))
 
     # 可选：显式强制 dtypes
     fever_ds = fever_ds.cast_column("semantic", Value("int64"))
@@ -166,6 +168,8 @@ if __name__ == "__main__":
     from itertools import islice
 
     print("⟹ 调试样本:", next(islice(train_ds, 0, 1)))
+    print(train_ds[0]["pair_id"], train_ds[1]["pair_id"],
+          train_ds[0]["is_adv"], train_ds[1]["is_adv"])
 
     # -------- model with Phase-A LoRA --------
     base  = AutoModelForCausalLM.from_pretrained(
@@ -188,6 +192,8 @@ if __name__ == "__main__":
             bf16=cfg.bf16,
             logging_steps=50,
             save_strategy="epoch",
+            dataloader_shuffle=False,  # 关键：保持顺序
+            drop_last=True  # batch 一定是偶数
         )
     )
     trainer.train()
