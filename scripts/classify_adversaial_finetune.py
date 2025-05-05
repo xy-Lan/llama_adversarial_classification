@@ -157,15 +157,15 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
     similarity_weighted_flip_rate = flipped_preserve_samples / valid_samples if valid_samples else 0
 
     # 导出翻转样本
-    # flipped_samples_df = df[df['prediction_flipped'] == True]
-    # flipped_samples_df.to_csv('./data/finetuned_peft_model_flipped_samples.csv', index=False)
-    # print(f"成功导出 {len(flipped_samples_df)} 个翻转样本到 './data/finetuned_peft_model_flipped_samples.csv'")
-    #
-    # # 导出保留原义且翻转的样本
-    # preserved_flipped_df = df[(df['agreed_labels'] == 0) & (df['prediction_flipped'] == True)]
-    # preserved_flipped_df.to_csv('./data/finetuned_peft_model_preserved_flipped_samples.csv', index=False)
-    # print(
-    #     f"成功导出 {len(preserved_flipped_df)} 个保留原义的翻转样本到 './data/finetuned_peft_model_preserved_flipped_samples.csv'")
+    flipped_samples_df = df[df['prediction_flipped'] == True]
+    flipped_samples_df.to_csv('./data/finetuned_peft_model_flipped_samples.csv', index=False)
+    print(f"成功导出 {len(flipped_samples_df)} 个翻转样本到 './data/finetuned_peft_model_flipped_samples.csv'")
+
+    # 导出保留原义且翻转的样本
+    preserved_flipped_df = df[(df['agreed_labels'] == 0) & (df['prediction_flipped'] == True)]
+    preserved_flipped_df.to_csv('./data/finetuned_peft_model_preserved_flipped_samples.csv', index=False)
+    print(
+        f"成功导出 {len(preserved_flipped_df)} 个保留原义的翻转样本到 './data/finetuned_peft_model_preserved_flipped_samples.csv'")
 
     # 输出结果
     print(f"总样本数: {total_samples}")

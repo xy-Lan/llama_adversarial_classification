@@ -2,7 +2,6 @@
 import os
 import logging
 import warnings
-import argparse
 import pandas as pd
 import torch
 from transformers import (
@@ -26,10 +25,9 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# 忽略特定警告
+# 忽略警告
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
-
 
 def setup_device_info():
     """打印系统设备信息"""
@@ -38,7 +36,6 @@ def setup_device_info():
         logging.info(f"当前CUDA设备: {torch.cuda.current_device()}")
         logging.info(f"CUDA设备名称: {torch.cuda.get_device_name(0)}")
         logging.info(f"CUDA内存: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-
 
 def prepare_training_data(csv_file):
     """从CSV加载数据并转换为微调格式"""
@@ -49,9 +46,6 @@ def prepare_training_data(csv_file):
     except Exception as e:
         logging.error(f"读取CSV文件时出错: {e}")
         return []
-
-    # 检查列是否存在prediction列
-    has_predictions = 'original_prediction' in df.columns and 'adversarial_prediction' in df.columns
 
     formatted_data = []
     skipped_rows = 0
@@ -76,55 +70,52 @@ def prepare_training_data(csv_file):
 
             evidence_adversarial, claim_adversarial = adversarial_sample.split('~', 1)
 
-            # 获取语义一致性标签
-            semantics_preserved = row['agreed_labels'] == 0.0
+            # 根据 agreed_labels 决定语义一致性
+            if row['agreed_labels'] == 0:  # 保留原义
+                # 语义保留的情况
+                consistency_output = "CONSISTENT"
 
-            # 获取输出标签
-            if not has_predictions or pd.isna(row.get('original_prediction')):
-                output_original = "SUPPORTED"
-            else:
-                output_original = row['original_prediction']
-
-            # 创建指令
-            instruction = (
-                "You are a fact verification assistant. Given evidence and a claim, "
-                "determine if the claim is SUPPORTED, REFUTED, or if there's NOT ENOUGH INFO "
-                "based solely on the provided evidence."
-            )
-
-            # 添加原始样本
-            formatted_data.append({
-                "instruction": instruction,
-                "input": f"Evidence: {evidence_original.strip()}\nClaim: {claim_original.strip()}\nQuestion: Is this claim supported, refuted, or not enough information based on the evidence?",
-                "output": output_original
-            })
-
-            # 仅为保留语义的样本添加对抗性样本
-            if semantics_preserved:
+                # 第一个训练样本：原始样本
                 formatted_data.append({
-                    "instruction": instruction,
-                    "input": f"Evidence: {evidence_adversarial.strip()}\nClaim: {claim_adversarial.strip()}\nQuestion: Is this claim supported, refuted, or not enough information based on the evidence?",
-                    "output": output_original
+                    "instruction": "你是一个语义一致性检查助手。判断两个不同表述的声明是否保留原始含义。",
+                    "input": f"Evidence: {evidence_original.strip()}\nClaim: {claim_original.strip()}",
+                    "output": "ORIGINAL"
                 })
 
-                # 添加一致性示例
-                consistency_instruction = (
-                    "You are a fact verification assistant. Given two different presentations "
-                    "of the same evidence and claim with identical meaning, you should provide "
-                    "consistent verdicts regardless of phrasing differences."
-                )
-
-                consistency_input = (
-                    f"Presentation 1:\nEvidence: {evidence_original.strip()}\nClaim: {claim_original.strip()}\n\n"
-                    f"Presentation 2:\nEvidence: {evidence_adversarial.strip()}\nClaim: {claim_adversarial.strip()}\n\n"
-                    f"Question: Do these presentations warrant the same verdict (SUPPORTED, REFUTED, or NOT ENOUGH INFO)?"
-                )
-
-                consistency_output = "Yes, these presentations have identical meaning and warrant the same verdict."
-
+                # 第二个训练样本：对抗性样本
                 formatted_data.append({
-                    "instruction": consistency_instruction,
-                    "input": consistency_input,
+                    "instruction": "你是一个语义一致性检查助手。判断两个不同表述的声明是否保留原始含义。",
+                    "input": f"Evidence: {evidence_adversarial.strip()}\nClaim: {claim_adversarial.strip()}",
+                    "output": "ORIGINAL"
+                })
+
+                # 一致性比较样本
+                formatted_data.append({
+                    "instruction": "你是一个语义一致性检查助手。判断两个不同表述的声明是否保留原始含义。",
+                    "input": (
+                        f"Presentation 1:\nEvidence: {evidence_original.strip()}\n"
+                        f"Claim: {claim_original.strip()}\n\n"
+                        f"Presentation 2:\nEvidence: {evidence_adversarial.strip()}\n"
+                        f"Claim: {claim_adversarial.strip()}\n\n"
+                        f"Question: Do these presentations have the same semantic meaning?"
+                    ),
+                    "output": consistency_output
+                })
+
+            elif row['agreed_labels'] == 1:  # 改变原义
+                # 语义改变的情况
+                consistency_output = "INCONSISTENT"
+
+                # 不同语义的比较样本
+                formatted_data.append({
+                    "instruction": "你是一个语义一致性检查助手。判断两个不同表述的声明是否保留原始含义。",
+                    "input": (
+                        f"Presentation 1:\nEvidence: {evidence_original.strip()}\n"
+                        f"Claim: {claim_original.strip()}\n\n"
+                        f"Presentation 2:\nEvidence: {evidence_adversarial.strip()}\n"
+                        f"Claim: {claim_adversarial.strip()}\n\n"
+                        f"Question: Do these presentations have the same semantic meaning?"
+                    ),
                     "output": consistency_output
                 })
 
@@ -136,17 +127,14 @@ def prepare_training_data(csv_file):
     logging.info(f"准备了 {len(formatted_data)} 条训练样本")
     return formatted_data
 
-
 def finetune_llama(
         model_name="meta-llama/Llama-3.2-1B-Instruct",
         training_data_file="data/final_complete_training_set.csv",
-        output_dir="models/llama-1b-adversarial-finetuned",
+        output_dir="models/llama-1b-semantic-consistency",
         epochs=3,
         learning_rate=2e-4,
-        batch_size=4,  # 根据GPU显存调整
-        gradient_accumulation_steps=8,  # 根据GPU显存调整
-        use_8bit=False,
-        use_4bit=False,
+        batch_size=4,
+        gradient_accumulation_steps=8,
         lora_rank=16,
         lora_alpha=32,
         max_seq_length=512,
@@ -174,32 +162,24 @@ def finetune_llama(
 
     # 加载分词器
     logging.info(f"加载模型和分词器: {model_name}")
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
-            use_auth_token=huggingface_token,
-            trust_remote_code=True
-        )
-    except Exception as e:
-        logging.error(f"加载分词器失败: {e}")
-        return None
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        use_auth_token=huggingface_token,
+        trust_remote_code=True
+    )
 
     # 确保分词器具有必要的特殊标记
     if not tokenizer.pad_token:
         tokenizer.pad_token = tokenizer.eos_token
 
     # 加载模型
-    try:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16,  # 使用半精度
-            use_auth_token=huggingface_token,
-            trust_remote_code=True,
-            device_map="auto"
-        )
-    except Exception as e:
-        logging.error(f"加载模型失败: {e}")
-        return None
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.float16,
+        use_auth_token=huggingface_token,
+        trust_remote_code=True,
+        device_map="auto"
+    )
 
     # 设置Gradient Checkpointing以节省内存
     model.gradient_checkpointing_enable()
@@ -306,11 +286,7 @@ def finetune_llama(
 
     # 开始训练
     logging.info("开始微调...")
-    try:
-        trainer.train()
-    except Exception as e:
-        logging.error(f"训练过程中出错: {e}")
-        return None
+    trainer.train()
 
     # 保存最终模型
     logging.info("保存模型...")
@@ -319,38 +295,57 @@ def finetune_llama(
     logging.info(f"训练完成！模型已保存到 {output_dir}")
     return trainer
 
-
 def main():
-    """主程序入口"""
-    # 设置参数解析
-    parser = argparse.ArgumentParser(description='Llama Adversarial Fine-Tuning')
-    parser.add_argument('--model', type=str, default="meta-llama/Llama-3.2-1B-Instruct", help='模型名称')
-    parser.add_argument('--data', type=str, default="data/final_complete_training_set.csv", help='训练数据文件')
-    parser.add_argument('--output', type=str, default="models/llama-1b-adversarial-finetuned", help='模型输出目录')
-    parser.add_argument('--epochs', type=int, default=3, help='训练轮数')
-    parser.add_argument('--batch_size', type=int, default=4, help='批量大小')
-    parser.add_argument('--lr', type=float, default=2e-4, help='学习率')
-    parser.add_argument('--hf_token', type=str, help='Hugging Face Token')
-
-    # 解析参数
-    args = parser.parse_args()
-
-    hf_token = "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"
-
-    if not hf_token:
-        logging.warning("未提供Hugging Face Token，可能无法访问私有模型")
-
-    # 执行微调
     finetune_llama(
-        model_name=args.model,
-        training_data_file=args.data,
-        output_dir=args.output,
-        huggingface_token=hf_token,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.lr
+        training_data_file="data/final_complete_training_set.csv",
+        output_dir="models/llama-1b-semantic-consistency",
+        epochs=3,
+        batch_size=4,
+        gradient_accumulation_steps=8
     )
-
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
