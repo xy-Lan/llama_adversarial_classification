@@ -64,6 +64,8 @@ class AdvTrainer(Trainer):
         self.alpha = alpha
 
     def compute_loss(self, model, inputs, return_outputs=False):
+        print(">> DEBUG: inside compute_loss; id=", id(self))
+
         # ----- 取出自定义字段 -----
         pair_id = inputs.pop("pair_id")
         semantic = inputs.pop("semantic")
@@ -71,23 +73,31 @@ class AdvTrainer(Trainer):
         # ----- 前向 -----
         logits = model(**inputs).logits[:, -1]  # [B, vocab]
 
-        # 1) Cross-entropy：本阶段不用，返回 0 但挂图
-        loss_ce = logits.sum() * 0.0  # ← 关键：*0 挂在 logits 上
+        # 1) CE：挂在 logits 上的 0
+        loss_ce = logits.sum() * 0.0
 
-        # 2) KL：同一 pair 且 semantic==0 才算
+        # 2) KL
         idx_o = torch.arange(0, logits.size(0), 2, device=logits.device)
         idx_a = idx_o + 1
         same = semantic[idx_o] == 0
-
         if same.any():
             p = F.log_softmax(logits[idx_o][same], -1)
             q = F.softmax(logits[idx_a][same], -1)
             loss_kl = F.kl_div(p, q, reduction="batchmean")
         else:
-            loss_kl = logits.sum() * 0.0  # 同理，挂在 logits 上
+            loss_kl = logits.sum() * 0.0  # 仍挂在 logits 上
 
-        loss = loss_ce + self.alpha * loss_kl
+        dummy = logits.sum() * 0.0  # 再保险 1 层
+
+        loss = dummy + loss_ce + self.alpha * loss_kl
+
+        # ========= 这里插入调试 =========
+        print("   logits.requires_grad =", logits.requires_grad)
+        print("   loss.requires_grad   =", loss.requires_grad)
+        # =================================
+
         return (loss, logits) if return_outputs else loss
+
 
 # ========== 4. CLI ==========
 def get_args():
