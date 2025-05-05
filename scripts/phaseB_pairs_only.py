@@ -24,7 +24,7 @@ def load_pairs(csv_path):
     big["labels"]   = -100
     return Dataset.from_pandas(big, preserve_index=False)
 
-pairs_ds = load_pairs("train.csv").cast_column("pair_id", Value("int64"))
+pairs_ds = load_pairs("./data/train.csv").cast_column("pair_id", Value("int64"))
 
 # ➋ tokenisation
 tok = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct", use_fast=False)
