@@ -195,7 +195,7 @@ if __name__ == "__main__":
             bf16=cfg.bf16,
             logging_steps=50,
             save_strategy="epoch",
-            drop_last=True  # batch 一定是偶数
+            dataloader_drop_last=True,   # batch 一定是偶数
         )
     )
     trainer.train()
