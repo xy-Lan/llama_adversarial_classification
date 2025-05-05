@@ -176,11 +176,22 @@ if __name__ == "__main__":
     # Sanity‑check
     assert all("pair_id" in row for row in train_ds)
 
-    # 5‑4. Model (+LoRA)
+    # ========== 5‑4. Model (+LoRA)
     base_model = AutoModelForCausalLM.from_pretrained(
         cfg.base_model, device_map="auto", torch_dtype="auto")
+
     model = PeftModel.from_pretrained(base_model, cfg.phaseA_dir) \
-            if cfg.phaseA_dir else base_model
+        if cfg.phaseA_dir else base_model
+
+    model.train()
+
+    # ✅ 解冻全部参数（必要时 LoRA adapter 默认已解冻）
+    for param in model.parameters():
+        param.requires_grad = True
+
+    # ✅ 打印确认
+    trainable = [n for n, p in model.named_parameters() if p.requires_grad]
+    print(f"✅ Trainable parameters: {len(trainable)}")
 
     # 5‑5. Trainer
     trainer = AdvTrainer(
