@@ -12,6 +12,7 @@ from transformers import (AutoTokenizer, AutoModelForCausalLM,
 from peft import PeftModel
 from huggingface_hub import login as hf_login
 from transformers import DataCollatorWithPadding
+from torch.nn.utils.rnn import pad_sequence
 
 
 # ---------- Part 1. 复用 Phase-A 的 WikiCache 与 prompt ----------
@@ -77,6 +78,28 @@ def load_adv_pairs(csv_path: str, keep_changed=False) -> Dataset:
     # 直接转 Dataset（全部列长度一致）
     return Dataset.from_pandas(big, preserve_index=False)
 
+def adv_collator(features):
+    # 1) 取出 input_ids 并做动态 padding
+    input_ids = [torch.tensor(f["input_ids"]) for f in features]
+    pad_id = tok.pad_token_id
+    input_ids = pad_sequence(input_ids, batch_first=True, padding_value=pad_id)
+
+    # 2) attention_mask = 1 for real tokens
+    attention_mask = (input_ids != pad_id).long()
+
+    # 3) 其余列直接堆成 tensor
+    def stack(name): return torch.tensor([f[name] for f in features])
+
+    batch = {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "labels": stack("labels"),
+        "pair_id": stack("pair_id"),
+        "semantic": stack("semantic"),
+        "is_adv": stack("is_adv"),
+    }
+    return batch
+
 # ---------- Part 4. 自定义 Trainer with CE + α·KL ----------
 class AdvTrainer(Trainer):
     def __init__(self, alpha=1.0, **kwargs):
@@ -105,6 +128,7 @@ class AdvTrainer(Trainer):
 
         loss = loss_ce + self.alpha * loss_kl
         return (loss, logits) if return_outputs else loss
+
 
 # ---------- Part 5. CLI & Main ----------
 def get_args():
@@ -187,7 +211,7 @@ if __name__ == "__main__":
         model=model,
         tokenizer=tok,
         train_dataset=train_ds,
-        data_collator=collator,
+        data_collator=adv_collator,
         args=TrainingArguments(
             output_dir=cfg.output_dir,
             per_device_train_batch_size=cfg.batch,
