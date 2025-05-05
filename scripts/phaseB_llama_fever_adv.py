@@ -195,7 +195,6 @@ if __name__ == "__main__":
             bf16=cfg.bf16,
             logging_steps=50,
             save_strategy="epoch",
-            shuffle=False,   # 关键：保持顺序
             drop_last=True  # batch 一定是偶数
         )
     )
