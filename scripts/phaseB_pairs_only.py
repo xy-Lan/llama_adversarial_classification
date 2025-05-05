@@ -125,13 +125,20 @@ if __name__ == "__main__":
         train_ds = train_ds.cast_column(col, Value("int64"))
 
     # 5‑3. Tokenisation
-    def tok_fn(batch):
-        enc = tok(batch["text"], truncation=True, padding=False)
-        enc["labels"]   = batch["labels"]
-        enc["pair_id"]  = batch["pair_id"]
-        enc["semantic"] = batch["semantic"]
-        enc["is_adv"]   = batch["is_adv"]
-        return enc
+    def tok_fn(examples):
+        tokens = tok(
+            examples["text"],
+            truncation=True,
+            padding="max_length",
+            max_length=512
+        )
+        tokens["labels"] = tokens["input_ids"].copy()
+
+        # 保留其他字段
+        for key in ["pair_id", "semantic", "is_adv"]:
+            if key in examples:
+                tokens[key] = examples[key]
+        return tokens
 
 
     train_ds = train_ds.map(
