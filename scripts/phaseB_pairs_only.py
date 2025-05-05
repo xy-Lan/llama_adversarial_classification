@@ -38,17 +38,17 @@ def load_adv_pairs(csv_path: str, keep_changed=False) -> Dataset:
 
 # ========== 2. Data collator ==========
 def adv_collator(features):
-    input_ids = [torch.tensor(f["input_ids"]) for f in features]
+    input_ids = [f["input_ids"].clone() for f in features]
     pad_id = tok.pad_token_id
     input_ids = pad_sequence(input_ids, batch_first=True, padding_value=pad_id)
     attention_mask = (input_ids != pad_id).long()
 
+    # ✅ 在这里定义改进的 stack 函数
     def stack(name):
-        values = [f[name] for f in features]
-        if isinstance(values[0], torch.Tensor):
-            return torch.stack(values)
-        else:
-            return torch.tensor(values)
+        values = [f[name] for f in features if name in f]
+        if len(values) < len(features):
+            raise ValueError(f"Some samples in the batch are missing the '{name}' field.")
+        return torch.stack(values) if isinstance(values[0], torch.Tensor) else torch.tensor(values)
 
     return {
         "input_ids": input_ids,
