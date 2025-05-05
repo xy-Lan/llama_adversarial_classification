@@ -64,15 +64,17 @@ class AdvTrainer(Trainer):
         self.alpha = alpha
 
     def compute_loss(self, model, inputs, return_outputs=False):
+        # ----- 取出自定义字段 -----
         pair_id = inputs.pop("pair_id")
         semantic = inputs.pop("semantic")
 
+        # ----- 前向 -----
         logits = model(**inputs).logits[:, -1]  # [B, vocab]
 
-        # ----- CE：跳过 -----
-        loss_ce = logits.sum() * 0.0  # 0，但连着计算图
+        # 1) Cross-entropy：本阶段不用，返回 0 但挂图
+        loss_ce = logits.sum() * 0.0  # ← 关键：*0 挂在 logits 上
 
-        # ----- KL -----
+        # 2) KL：同一 pair 且 semantic==0 才算
         idx_o = torch.arange(0, logits.size(0), 2, device=logits.device)
         idx_a = idx_o + 1
         same = semantic[idx_o] == 0
@@ -82,7 +84,7 @@ class AdvTrainer(Trainer):
             q = F.softmax(logits[idx_a][same], -1)
             loss_kl = F.kl_div(p, q, reduction="batchmean")
         else:
-            loss_kl = logits.sum() * 0.0  # 0，保持梯度链
+            loss_kl = logits.sum() * 0.0  # 同理，挂在 logits 上
 
         loss = loss_ce + self.alpha * loss_kl
         return (loss, logits) if return_outputs else loss
