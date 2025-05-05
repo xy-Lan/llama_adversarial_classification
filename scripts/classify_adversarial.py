@@ -68,7 +68,7 @@ def construct_prompts(df):
     return original_prompts, adversarial_prompts, skipped_samples, valid_samples
 
 
-def load_model(model_name="meta-llama/Llama-3.2-1B-Instruct", token=None):
+def load_model(model_name="meta-llama/Llama-3.2-3B-Instruct", token=None):
     """加载语言模型和tokenizer"""
     print("Loading model...")
 
