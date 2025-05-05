@@ -49,13 +49,13 @@ def construct_prompts(df):
         original_prompt = (
             f"Evidence: {evidence_original.strip()}\n"
             f"Claim: {claim_original.strip()}\n"
-            "Question: Is this claim supported or refuted based on the evidence?\n"
+            "Question: Is this claim supported or refuted based on the evidence? Answer ONLY “SUPPORTED” or “REFUTED” (no other words)\n"
             "Answer:"
         )
         adversarial_prompt = (
             f"Evidence: {evidence_adversarial.strip()}\n"
             f"Claim: {claim_adversarial.strip()}\n"
-            "Question: Is this claim supported or refuted based on the evidence?\n"
+            "Question: Is this claim supported or refuted based on the evidence? Answer ONLY “SUPPORTED” or “REFUTED” (no other words)\n"
             "Answer:"
         )
 
@@ -115,6 +115,8 @@ def load_model(model_name="meta-llama/Llama-3.2-3B-Instruct", token=None):
         # quantization_config=quant_config,  # 使用量化
         device_map="auto",  # 自动管理模型在GPU和CPU之间的分配
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,  # 使用BF16（如果支持）
+        # torch_dtype=torch.float16,
+        low_cpu_mem_usage=True
     )
 
     model.eval()
@@ -188,7 +190,9 @@ def classify_with_llama(tokenizer, model, prompts, batch_size=32):
 
             # 处理每个输出
             for j, output_ids in enumerate(outputs):
-                output_text = tokenizer.decode(output_ids, skip_special_tokens=True)
+                # output_text = tokenizer.decode(output_ids, skip_special_tokens=True)
+                gen_ids = output_ids[batch_inputs['input_ids'].shape[1:]]
+                output_text = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
                 prediction = parse_answer(output_text)
                 predictions.append(prediction)
                 if (i + j + 1) % 10 == 0:  # 每10个样本输出一次，减少日志量
