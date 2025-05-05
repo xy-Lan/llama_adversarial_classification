@@ -43,8 +43,12 @@ def adv_collator(features):
     input_ids = pad_sequence(input_ids, batch_first=True, padding_value=pad_id)
     attention_mask = (input_ids != pad_id).long()
 
-    def stack(name):                                   # 不再担心缺列
-        return torch.tensor([f[name] for f in features])
+    def stack(name):
+        values = [f[name] for f in features]
+        if isinstance(values[0], torch.Tensor):
+            return torch.stack(values)
+        else:
+            return torch.tensor(values)
 
     return {
         "input_ids": input_ids,
