@@ -133,14 +133,19 @@ if __name__ == "__main__":
         enc["is_adv"]   = batch["is_adv"]
         return enc
 
+
     train_ds = train_ds.map(
-        tok_fn, batched=True, remove_columns=["text"],
-        load_from_cache_file=False          # 刷新缓存
-    ).set_format(
+        tok_fn,
+        batched=True,
+        remove_columns=["text"],
+        load_from_cache_file=False
+    )
+    train_ds.set_format(
         type="torch",
         columns=["input_ids", "attention_mask", "labels",
                  "pair_id", "semantic", "is_adv"]
     )
+
     # Sanity‑check
     assert all("pair_id" in row for row in train_ds)
 
