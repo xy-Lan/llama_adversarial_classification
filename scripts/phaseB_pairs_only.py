@@ -187,6 +187,7 @@ if __name__ == "__main__":
             logging_steps=20,
             save_strategy="epoch",
             dataloader_drop_last=True,      # batch 必须偶数
+            remove_unused_columns=False  # ←★ 保留自定义字段
         )
     )
 
