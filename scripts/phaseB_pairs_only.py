@@ -158,6 +158,9 @@ if __name__ == "__main__":
     )
     print("Example keys after tokenization:", train_ds[0].keys())
 
+    required_fields = ["input_ids", "attention_mask", "labels", "pair_id", "semantic", "is_adv"]
+    train_ds = train_ds.filter(lambda ex: all(k in ex and ex[k] is not None for k in required_fields))
+
     # Sanity‑check
     assert all("pair_id" in row for row in train_ds)
 
