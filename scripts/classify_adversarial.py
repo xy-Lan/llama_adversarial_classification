@@ -92,7 +92,7 @@ def load_model(model_name="meta-llama/Llama-3.2-3B-Instruct", token=None):
 
     # 配置8位量化或BF16混合精度以减少内存使用并加速
     quant_config = BitsAndBytesConfig(
-        load_in_8bit=True,  # 启用8位量化
+        load_in_8bit=False,  # 启用8位量化
         llm_int8_enable_fp32_cpu_offload=True,  # 需要时卸载到CPU
         llm_int8_threshold=6.0,  # 量化阈值
     )
@@ -112,7 +112,7 @@ def load_model(model_name="meta-llama/Llama-3.2-3B-Instruct", token=None):
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         use_auth_token=token,
-        quantization_config=quant_config,  # 使用量化
+        # quantization_config=quant_config,  # 使用量化
         device_map="auto",  # 自动管理模型在GPU和CPU之间的分配
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,  # 使用BF16（如果支持）
     )
