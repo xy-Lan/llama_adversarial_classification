@@ -180,19 +180,33 @@ if __name__ == "__main__":
 
     collator = DataCollatorWithPadding(tokenizer=tok, return_tensors="pt")  # ★
 
-    # ========== ① 在这里：先 tokenization，然后打印一个样本 ==========
+    # # ========== ① 在这里：先 tokenization，然后打印一个样本 ==========
+    # def tok_fn(batch):
+    #     out = tok(batch["text"],
+    #               truncation=True,
+    #               padding=False)  # 让 DataCollatorWithPadding 再统一 pad
+    #     out["labels"] = batch["labels"]  # 把原 label 搬过来
+    #     # 其余自定义字段原样保留
+    #     for fld in ("pair_id", "semantic", "is_adv"):
+    #         if fld in batch:
+    #             out[fld] = batch[fld]
+    #     return out
     def tok_fn(batch):
-        out = tok(batch["text"],
-                  truncation=True,
-                  padding=False)  # 让 DataCollatorWithPadding 再统一 pad
-        out["labels"] = batch["labels"]  # 把原 label 搬过来
-        # 其余自定义字段原样保留
-        for fld in ("pair_id", "semantic", "is_adv"):
-            if fld in batch:
-                out[fld] = batch[fld]
+        out = tok(batch["text"], truncation=True, padding=False)  # 只做编码
+        out["labels"] = batch["labels"]  # -100 也要保留
+        out["pair_id"] = batch["pair_id"]  # ★ 直接拷贝，别再 if
+        out["semantic"] = batch["semantic"]
+        out["is_adv"] = batch["is_adv"]
         return out
 
+
     train_ds = train_ds.map(tok_fn, batched=True, remove_columns=["text"])
+
+    train_ds.set_format(
+        type="torch",
+        columns=["input_ids", "attention_mask", "labels",
+                 "pair_id", "semantic", "is_adv"]
+    )
 
     # —— 快速调试：看第一条样本结构 ——
     from itertools import islice
@@ -200,6 +214,8 @@ if __name__ == "__main__":
     print("⟹ 调试样本:", next(islice(train_ds, 0, 1)))
     print(train_ds[0]["pair_id"], train_ds[1]["pair_id"],
           train_ds[0]["is_adv"], train_ds[1]["is_adv"])
+
+    print(train_ds[0].keys())
 
     # -------- model with Phase-A LoRA --------
     base  = AutoModelForCausalLM.from_pretrained(
