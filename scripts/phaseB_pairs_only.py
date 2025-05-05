@@ -221,7 +221,8 @@ if __name__ == "__main__":
 
     # 5‑6. Train + save
     trainer.train()
-    trainer.save_model(cfg.output_dir)
-    print(f"✅ Phase B 权重已保存到：{cfg.output_dir}")
+    model.save_pretrained(cfg.output_dir)
+    tok.save_pretrained(cfg.output_dir)
+    print(f"✅ 仅保存 LoRA adapter 和 tokenizer 到：{cfg.output_dir}")
     save_strategy = "epoch"
     save_total_limit = 1
