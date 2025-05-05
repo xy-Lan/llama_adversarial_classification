@@ -200,13 +200,21 @@ if __name__ == "__main__":
         return out
 
 
-    train_ds = train_ds.map(tok_fn, batched=True, remove_columns=["text"])
+    train_ds = train_ds.map(
+        tok_fn,
+        batched=True,
+        remove_columns=["text"],
+        load_from_cache_file=False,  # ★ 关键：不要用旧缓存
+        # keep_in_memory=True         # 如果内存够，也可以全放内存
+    )
 
     train_ds.set_format(
         type="torch",
         columns=["input_ids", "attention_mask", "labels",
                  "pair_id", "semantic", "is_adv"]
     )
+
+    assert all("pair_id" in row for row in train_ds), "还有样本缺 pair_id!"
 
     # —— 快速调试：看第一条样本结构 ——
     from itertools import islice
