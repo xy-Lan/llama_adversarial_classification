@@ -149,6 +149,9 @@ if __name__ == "__main__":
 
     train_ds  = concatenate_datasets([fever_ds, pairs_ds])
 
+    # ★ 先按 pair_id→is_adv 排序，让 0=orig, 1=adv 紧邻
+    train_ds = train_ds.sort(["pair_id", "is_adv"])
+
 
     # ========== ① 在这里：先 tokenization，然后打印一个样本 ==========
     def tok_fn(batch):
