@@ -105,13 +105,34 @@ def load_model(model_name="meta-llama/Llama-3.2-1B-Instruct", token=None):
     return tokenizer, model
 
 
-def classify_with_llama(tokenizer, model, prompts):
+def classify_with_llama(tokenizer, model, prompts, batch_size=32):
     predictions = []
-    batch_size = 32  # 根据H100内存大小可以调整批处理大小
 
     # 确定设备
     device = next(model.parameters()).device
     print(f"Model is on device: {device}")
+
+    # 设置pad token
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        print("设置pad_token = eos_token")
+
+    # 检测是否为H100并自动调整批处理大小
+    if torch.cuda.is_available():
+        gpu_properties = torch.cuda.get_device_properties(0)
+        gpu_memory_gb = gpu_properties.total_memory / 1e9
+        print(f"GPU: {gpu_properties.name} with {gpu_memory_gb:.1f} GB memory")
+
+        # 如果是H100，自动调整批处理大小
+        if "H100" in gpu_properties.name:
+            # H100 通常有80GB内存，可以处理更大批次
+            batch_size = min(batch_size, 128)  # 上限为128，但用户可以通过参数覆盖
+            print(f"H100 detected! Using batch size: {batch_size}")
+        else:
+            # 基于GPU内存估算合适的批处理大小
+            estimated_batch_size = int(gpu_memory_gb * 2)  # 每GB内存估计处理2个样本
+            batch_size = min(batch_size, estimated_batch_size)
+            print(f"Using adjusted batch size: {batch_size} based on available GPU memory")
 
     # 批处理预测
     for i in range(0, len(prompts), batch_size):
@@ -119,27 +140,52 @@ def classify_with_llama(tokenizer, model, prompts):
         print(
             f"Processing batch {i // batch_size + 1}/{(len(prompts) - 1) // batch_size + 1}: samples {i + 1}-{min(i + batch_size, len(prompts))}")
 
-        # 对批次进行编码
-        batch_inputs = tokenizer(batch_prompts, padding=True, return_tensors='pt')
+        try:
+            # 对批次进行编码
+            batch_inputs = tokenizer(batch_prompts, padding=True, return_tensors='pt')
 
-        # 将输入移至与模型相同的设备
-        batch_inputs = {k: v.to(device) for k, v in batch_inputs.items()}
+            # 将输入移至与模型相同的设备
+            batch_inputs = {k: v.to(device) for k, v in batch_inputs.items()}
 
-        with torch.no_grad():
-            # 使用批处理生成
-            outputs = model.generate(
-                **batch_inputs,
-                max_length=batch_inputs['input_ids'].shape[1] + 10,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-            )
+            with torch.no_grad():
+                # 使用批处理生成
+                outputs = model.generate(
+                    **batch_inputs,
+                    max_length=batch_inputs['input_ids'].shape[1] + 10,
+                    do_sample=False,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
 
-        # 处理每个输出
-        for j, output_ids in enumerate(outputs):
-            output_text = tokenizer.decode(output_ids, skip_special_tokens=True)
-            prediction = parse_answer(output_text)
-            predictions.append(prediction)
-            print(f"Prediction for prompt {i + j + 1}: {prediction}")
+            # 处理每个输出
+            for j, output_ids in enumerate(outputs):
+                output_text = tokenizer.decode(output_ids, skip_special_tokens=True)
+                prediction = parse_answer(output_text)
+                predictions.append(prediction)
+                if (i + j + 1) % 10 == 0:  # 每10个样本输出一次，减少日志量
+                    print(f"Processed {i + j + 1}/{len(prompts)} samples")
+
+        except Exception as e:
+            print(f"Error processing batch {i // batch_size + 1}: {e}")
+            print("Falling back to individual processing for this batch")
+
+            # 如果批处理失败，尝试逐个处理
+            for j, prompt in enumerate(batch_prompts):
+                try:
+                    input_ids = tokenizer.encode(prompt, return_tensors='pt').to(device)
+                    with torch.no_grad():
+                        output_ids = model.generate(
+                            input_ids=input_ids,
+                            max_length=input_ids.shape[1] + 10,
+                            do_sample=False,
+                            pad_token_id=tokenizer.eos_token_id,
+                        )
+                    output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+                    prediction = parse_answer(output_text)
+                    predictions.append(prediction)
+                    print(f"Processed individual sample {i + j + 1}/{len(prompts)}: {prediction}")
+                except Exception as inner_e:
+                    print(f"Error processing individual sample {i + j + 1}: {inner_e}")
+                    predictions.append("UNKNOWN")  # 添加默认预测
 
     return predictions
 
