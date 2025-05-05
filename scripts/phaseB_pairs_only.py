@@ -15,26 +15,21 @@ from torch.nn.utils.rnn import pad_sequence
 
 # ========== 1. CSV → Dataset ==========
 def load_adv_pairs(csv_path: str, keep_changed=False) -> Dataset:
-    """读取 pairs CSV 并展开为 2×行：
-       - original_samples → is_adv=0
-       - adversarial_samples → is_adv=1
+    """读取预处理后的扁平 CSV，每条样本包含：
+       - text
+       - is_adv
+       - semantic
+       - pair_id
+    可选地过滤掉 semantic != 0 的样本
     """
     df = pd.read_csv(csv_path)
+
     if not keep_changed:
-        df = df[df["agreed_labels"] == 0]
+        df = df[df["semantic"] == 0]  # 只保留语义未变化的样本
 
-    df_orig = df[["original_samples", "agreed_labels"]].copy()
-    df_orig.columns = ["text", "semantic"]           # semantic: 0=相同，1=不同
-    df_orig["is_adv"] = 0
+    df["labels"] = -100  # Phase B 不训练分类器，只训练区分对抗样本
+    return Dataset.from_pandas(df, preserve_index=False)
 
-    df_adv = df[["adversarial_samples", "agreed_labels"]].copy()
-    df_adv.columns = ["text", "semantic"]
-    df_adv["is_adv"] = 1
-
-    big = pd.concat([df_orig, df_adv], ignore_index=True)
-    big["pair_id"] = big.index // 2                  # 同一对共享 id
-    big["labels"]  = -100                            # Phase B 不算 CE
-    return Dataset.from_pandas(big, preserve_index=False)
 
 # ========== 2. Data collator ==========
 def adv_collator(features):
