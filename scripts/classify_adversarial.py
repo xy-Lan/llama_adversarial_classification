@@ -52,7 +52,7 @@ def load_model(model_name: str, token=None):
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32  = True
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token, cache_dir=os.environ["HF_HOME"])
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
@@ -62,7 +62,8 @@ def load_model(model_name: str, token=None):
         use_auth_token=token,
         device_map="auto",
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-        low_cpu_mem_usage=True
+        low_cpu_mem_usage=True,
+        cache_dir = os.environ["HF_HOME"]
     )
     model.eval()
     print("Model ready.")
@@ -204,7 +205,10 @@ def main():
     parser.add_argument("--token")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--data_path", default="./data/adversarial_dataset_corrected.csv")
-    parser.add_argument("--output_dir", default="./results")
+    # parser.add_argument("--output_dir", default="./results")
+    "--output_dir",
+    default = os.path.join(os.environ.get("TMPDIR", "/tmp"), "results"),
+    help = "结果保存目录（默认写入临时目录 TMPDIR/results）"
     args = parser.parse_args()
 
     df = load_data(args.data_path)
