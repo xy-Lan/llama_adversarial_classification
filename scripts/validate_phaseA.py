@@ -20,13 +20,23 @@ dev = dev.filter(lambda r: r["label"] != "NOT ENOUGH INFO")
 wiki = WikiCache()
 
 
+sys_msg_validation = (
+        "<<SYS>>\\n"
+        "You are a fact-checking assistant.\\n"
+        "Given EVIDENCE and a CLAIM, reply with exactly one token: "
+        "SUPPORTED or REFUTED.\\n" # 确保这里和训练时一致
+        "Do not output anything else.\\n"
+        "<</SYS>>"
+    )
+
 def to_prompt(r):
     evid = wiki.sent(r["evidence_id"], r["evidence_sentence_id"])
     return (
-        f"Evidence: {evid}\n"
-        f"Claim: {r['claim']}\n"
-        "Question: Is this claim supported or refuted by the evidence?\n"
-        "Answer:"
+        f"<s>[INST] {sys_msg_validation}\\n" # 使用一致的系统消息
+        f"Evidence: {evid}\\n"
+        f"Claim: {r['claim']}\\n"
+        "Question: Is this claim supported or refuted by the evidence?\\n"
+        "Answer:[/INST] " # 注意这里结尾的部分，要和训练时一致
     )
 
 
