@@ -206,9 +206,11 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--data_path", default="./data/adversarial_dataset_corrected.csv")
     # parser.add_argument("--output_dir", default="./results")
+    parser.add_argument(
     "--output_dir",
-    default = os.path.join(os.environ.get("TMPDIR", "/tmp"), "results"),
-    help = "结果保存目录（默认写入临时目录 TMPDIR/results）"
+    default=os.path.join(os.environ.get("TMPDIR", "/tmp"), "results"),
+    help="模型输出结果目录（默认写入 TMPDIR/results）"
+    )
     args = parser.parse_args()
 
     df = load_data(args.data_path)
