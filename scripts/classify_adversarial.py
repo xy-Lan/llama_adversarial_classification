@@ -1,178 +1,241 @@
 # scripts/classify_adversarial.py
 
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Adversarial classification script – **outputs strictly `SUPPORTED` or `REFUTED`**.
 
-基于用户现有脚本改写：
-* prompt 最后加硬规则：只能回答两个单词。
-* 自定义 `TwoLabelLimiter` `LogitsProcessor`，把除 SUPPORTED/REFUTED 之外的 logits 设为 −inf。
-* `generate()` 最多 1 token，temperature=0。
-* 解析时只取新 token；若首字母 “S” → SUPPORTED，否则 REFUTED。
-
-可直接替换原脚本运行。
-"""
-import argparse
-import os
-import time
-import traceback
-from pathlib import Path
-
+import os, time, argparse, traceback
 import pandas as pd
 import torch
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    LogitsProcessor,
-    LogitsProcessorList,
-)
+from transformers import (AutoTokenizer, AutoModelForCausalLM,
+                          BitsAndBytesConfig, LogitsProcessor,
+                          LogitsProcessorList)
 
-############################################
-# -------------  Data utils  ------------- #
-############################################
-
-def load_data(csv_path: str) -> pd.DataFrame:
-    return pd.read_csv(csv_path)
+# ---------- 数据加载 ----------
+def load_data(file_path: str) -> pd.DataFrame:
+    return pd.read_csv(file_path)
 
 
+# ---------- prompt 构造 ----------
 def construct_prompts(df: pd.DataFrame):
     orig, adv, skipped = [], [], []
+
     for idx, row in df.iterrows():
         o, a = row["original_samples"], row["adversarial_samples"]
-        if not isinstance(o, str) or not isinstance(a, str):
+        if not (isinstance(o, str) and isinstance(a, str)):
             skipped.append(idx); continue
         if "~" not in o or "~" not in a:
             skipped.append(idx); continue
-        o_evi, o_clm = (s.strip() for s in o.split("~", 1))
-        a_evi, a_clm = (s.strip() for s in a.split("~", 1))
-        tmpl = (
-            "Evidence: {e}\n"
-            "Claim: {c}\n"
-            "Question: Is this claim supported or refuted based on the evidence? "
-            "Answer ONLY \"SUPPORTED\" or \"REFUTED\" (no other words)\n"
-            "Answer:"
-        )
-        orig.append(tmpl.format(e=o_evi, c=o_clm))
-        adv.append(tmpl.format(e=a_evi, c=a_clm))
+
+        ev_o, cl_o = o.split("~", 1)
+        ev_a, cl_a = a.split("~", 1)
+
+        tpl = ("Evidence: {}\n"
+               "Claim: {}\n"
+               "Question: Is this claim supported or refuted based on the evidence? "
+               "Answer ONLY “SUPPORTED” or “REFUTED” (no other words)\n"
+               "Answer:")
+
+        orig.append(tpl.format(ev_o.strip(), cl_o.strip()))
+        adv.append (tpl.format(ev_a.strip(), cl_a.strip()))
+
     print(f"Total {len(df)} | Skipped {len(skipped)} | Valid {len(df)-len(skipped)}")
     return orig, adv, skipped, len(df)-len(skipped)
 
-############################################
-# -------------  Model utils ------------- #
-############################################
 
-class TwoLabelLimiter(LogitsProcessor):
-    """Mask logits, leaving only ids in *allow_ids* active."""
-    def __init__(self, allow_ids):
-        self.allow = allow_ids
-    def __call__(self, input_ids, scores):
-        mask = torch.full_like(scores, float('-inf'))
-        mask[:, self.allow] = 0
-        return scores + mask
-
-
-def load_model(model_name: str, token: str | None):
-    device_info = "cuda" if torch.cuda.is_available() else "cpu"
-    print("Loading", model_name, "on", device_info)
+# ---------- 模型加载 ----------
+def load_model(model_name: str, token=None):
+    print("Loading model …")
+    if torch.cuda.is_available():
+        gpu = torch.cuda.get_device_properties(0)
+        print(f"GPU: {gpu.name}  {gpu.total_memory/1e9:.1f} GB")
+        if "H100" in gpu.name:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32  = True
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
 
-    # prefer bf16 else fp32
-    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-    bnb_cfg = BitsAndBytesConfig(load_in_8bit=False)
-
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         use_auth_token=token,
-        torch_dtype=dtype,
         device_map="auto",
-        low_cpu_mem_usage=True,
-        quantization_config=bnb_cfg,
+        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        low_cpu_mem_usage=True
     )
     model.eval()
+    print("Model ready.")
     return tokenizer, model
 
-############################################
-# -------------  Inference  -------------- #
-############################################
 
-def classify(prompts, tokenizer, model, batch_size=32):
-    device = next(model.parameters()).device
+# ---------- 只允许两个 token 的 logits 处理器 ----------
+class TwoLabelLimiter(LogitsProcessor):
+    def __init__(self, allow_ids):
+        self.allow = allow_ids          # list[int]
 
-    allow_ids = []
-    for lbl in ("SUPPORTED", "REFUTED"):
-        tid = tokenizer.convert_tokens_to_ids(lbl)
-        if tid is None:
-            tid = tokenizer(lbl, add_special_tokens=False)["input_ids"][0]
-        allow_ids.append(tid)
+    def __call__(self, input_ids, scores):
+        mask = torch.full_like(scores, float("-inf"))
+        mask[:, self.allow] = 0
+        return scores + mask
 
-    logits_proc = LogitsProcessorList([TwoLabelLimiter(allow_ids)])
-    print("调试Allowed label token ids:", allow_ids)
 
+def parse_answer(first_token_id, sup_id):
+    return "SUPPORTED" if first_token_id == sup_id else "REFUTED"
+
+
+# ---------- 分类 ----------
+def classify(tok, model, prompts, batch_size=32):
     preds = []
-    for start in range(0, len(prompts), batch_size):
-        batch = prompts[start:start+batch_size]
-        enc = tokenizer(batch, padding=True, return_tensors="pt").to(device)
-        with torch.no_grad():
-            outs = model.generate(
-                **enc,
-                max_new_tokens=1,
-                temperature=0.0,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-                logits_processor=logits_proc,
-            )
-        inp_len = enc["input_ids"].shape[1]
-        for o in outs:
-            tok_id = o[inp_len].item()  # 只取新 token
-            preds.append("SUPPORTED" if tok_id == allow_ids[0] else "REFUTED")
+    device = next(model.parameters()).device
+    print(f"Model is on device: {device}")
+
+    # H100 自动调批
+    if torch.cuda.is_available():
+        mem = torch.cuda.get_device_properties(0).total_memory/1e9
+        batch_size = min(batch_size, int(mem)//2 or 1)
+        print(f"Adjusted batch size: {batch_size}")
+
+    # 准备允许 token id
+    allow = []
+    for lbl in ("SUPPORTED", "REFUTED"):
+        tid = tok.convert_tokens_to_ids(lbl)
+        if tid is None:  # 多 token → 取首 token
+            tid = tok(lbl, add_special_tokens=False)["input_ids"][0]
+        allow.append(tid)
+    limiter = LogitsProcessorList([TwoLabelLimiter(allow)])
+
+    for i in range(0, len(prompts), batch_size):
+        batch = prompts[i:i+batch_size]
+        print(f"Batch {i//batch_size+1}/{(len(prompts)-1)//batch_size+1}")
+
+        try:
+            inputs = tok(batch, padding=True, return_tensors="pt").to(device)
+            with torch.no_grad():
+                outs = model.generate(
+                    **inputs,
+                    max_new_tokens=1,
+                    do_sample=False,
+                    temperature=0.0,
+                    pad_token_id=tok.eos_token_id,
+                    logits_processor=limiter
+                )
+            inp_len = inputs["input_ids"].shape[1]
+            for out in outs:
+                first_id = out[inp_len].item()
+                preds.append(parse_answer(first_id, allow[0]))
+        except Exception as e:
+            print("Batch error:", e)
+            # 单条回退
+            for j, p in enumerate(batch):
+                try:
+                    ids = tok(p, return_tensors="pt").to(device)
+                    out = model.generate(
+                        **ids, max_new_tokens=1, do_sample=False,
+                        logits_processor=limiter)
+                    first_id = out[0, ids["input_ids"].shape[1]].item()
+                    preds.append(parse_answer(first_id, allow[0]))
+                except Exception as ie:
+                    print("Single sample error:", ie)
+                    preds.append("UNKNOWN")
     return preds
 
-############################################
-# -------------  Metrics  ---------------- #
-############################################
 
-def evaluate(df, orig_preds, adv_preds, skipped, valid):
-    sdf = df.drop(index=skipped).reset_index(drop=True)
-    sdf["orig"], sdf["adv"] = orig_preds, adv_preds
-    sdf["flip"] = sdf["orig"] != sdf["adv"]
-    sdf["correct"] = sdf["orig"] == sdf["correctness"].str.upper()
-    print("Clean acc:", f"{sdf['correct'].mean():.2%}")
-    print("Flip rate:", f"{sdf['flip'].sum()/valid:.2%}")
-    return sdf
+# ---------- 结果统计（与你原版一致） ----------
+def compare_results_with_accuracy(df, orig_preds, adv_preds,
+                                  valid_samples, model_name,
+                                  output_dir="./results"):
 
-############################################
-# ---------------- main ------------------ #
-############################################
+    df["original_prediction"]    = orig_preds
+    df["adversarial_prediction"] = adv_preds
+    df["prediction_flipped"]     = df["original_prediction"] != df["adversarial_prediction"]
+    df["correct"] = df["original_prediction"] == df["correctness"].str.upper()
 
+    clean_acc   = df["correct"].mean() if len(df) else 0
+    total_flip  = df["prediction_flipped"].sum()
+    flip_rate   = total_flip / valid_samples if valid_samples else 0
+
+    df_correct  = df[df["correct"]]
+    flip_corr   = df_correct["prediction_flipped"].sum()
+    corr_flip_r = flip_corr / len(df_correct) if len(df_correct) else 0
+
+    df_preserve = df[(df["agreed_labels"] == 0) & df["correct"]]
+    flip_pcorr  = df_preserve["prediction_flipped"].sum()
+    pcorr_r     = flip_pcorr / len(df_preserve) if len(df_preserve) else 0
+
+    os.makedirs(output_dir, exist_ok=True)
+    short = model_name.split("/")[-1]
+    txt   = os.path.join(output_dir, f"{short}_results.txt")
+
+    with open(txt, "w", encoding="utf-8") as f:
+        f.write(f"===== {short} 分类结果 =====\n\n")
+        f.write(f"评估时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        f.write(f"总样本数: {len(df)}  有效样本: {valid_samples}\n")
+        f.write(f"Clean Accuracy: {clean_acc:.2%}\n\n")
+        f.write(f"翻转率: {flip_rate:.2%}\n")
+        f.write(f"正确预测中的翻转率: {corr_flip_r:.2%}\n")
+        f.write(f"保留原义+正确预测中的翻转率: {pcorr_r:.2%}\n")
+
+    print(f"\n结果已保存到: {txt}")
+    print("===== 分类结果 =====")
+    print(f"Total samples: {len(df)}")
+    print(f"Clean Accuracy: {clean_acc:.2%}")
+    print(f"All flip rate: {flip_rate:.2%}")
+    print(f"Correct flip rate: {corr_flip_r:.2%}")
+    print(f"Preserve+Correct flip rate: {pcorr_r:.2%}")
+
+    return df
+
+
+def export_incorrect_predictions(df, model_name, out_dir="./results"):
+    short = model_name.split("/")[-1]
+    path  = os.path.join(out_dir, f"{short}_misclassified.csv")
+    cols = ["original_samples", "adversarial_samples",
+            "original_prediction", "correctness"]
+    df[df["original_prediction"] != df["correctness"].str.upper()][cols] \
+        .to_csv(path, index=False)
+    print(f"Misclassified samples saved to {path}")
+
+
+# ---------- 主入口 ----------
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="meta-llama/Llama-3.2-3B-Instruct")
-    ap.add_argument("--token")
-    ap.add_argument("--csv", default="./data/adversarial_dataset_corrected.csv")
-    ap.add_argument("--batch", type=int, default=32)
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default="meta-llama/Llama-3.2-3B-Instruct")
+    parser.add_argument("--token")
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--data_path", default="./data/adversarial_dataset_corrected.csv")
+    parser.add_argument("--output_dir", default="./results")
+    args = parser.parse_args()
 
-    df = load_data(args.csv)
-    orig, adv, skipped, valid = construct_prompts(df)
-    tok, mdl = load_model(args.model, args.token)
+    df = load_data(args.data_path)
+    orig_p, adv_p, skipped, valid = construct_prompts(df)
 
-    print("\nOriginal prompts …")
-    o_preds = classify(orig, tok, mdl, args.batch)
+    tok, model = load_model(args.model, args.token)
 
-    print("\nAdversarial prompts …")
-    a_preds = classify(adv, tok, mdl, args.batch)
+    print("\nClassifying original …")
+    o_preds = classify(tok, model, orig_p, args.batch_size)
+    print("\nClassifying adversarial …")
+    a_preds = classify(tok, model, adv_p, args.batch_size)
 
-    evaluate(df, o_preds, a_preds, skipped, valid)
+    valid_df = df.drop(index=skipped).reset_index(drop=True)
+    res_df   = compare_results_with_accuracy(valid_df, o_preds, a_preds,
+                                             valid, args.model, args.output_dir)
+    export_incorrect_predictions(res_df, args.model, args.output_dir)
+
+    # 保存完整 CSV
+    full_path = os.path.join(args.output_dir,
+                             args.model.split("/")[-1] + "_full_results.csv")
+    res_df.to_csv(full_path, index=False)
+    print(f"Full csv saved to {full_path}")
+
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
+    except Exception as e:
+        print("程序执行出错:", e)
         traceback.print_exc()
+
 
 
 
