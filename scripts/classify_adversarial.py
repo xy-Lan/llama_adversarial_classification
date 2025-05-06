@@ -122,8 +122,18 @@ def classify(tok, model, prompts, batch_size=32):
         if tid is None:  # 多 token → 取首 token
             tid = tok(lbl, add_special_tokens=False)["input_ids"][0]
         allow.append(tid)
+    
+    # 打印token调试信息
+    print(f"SUPPORTED token ID: {allow[0]}, REFUTED token ID: {allow[1]}")
+    print(f"Checking if tokens decode correctly:")
+    print(f"SUPPORTED decodes to: {tok.decode([allow[0]])}")
+    print(f"REFUTED decodes to: {tok.decode([allow[1]])}")
+    
     limiter = LogitsProcessorList([TwoLabelLimiter(allow)])
 
+    # 记录不同的预测结果以验证是否有变化
+    prediction_counts = {"SUPPORTED": 0, "REFUTED": 0}
+    
     for i in range(0, len(prompts), batch_size):
         batch = prompts[i : i + batch_size]
         print(f"Batch {i//batch_size+1}/{(len(prompts)-1)//batch_size+1}")
@@ -142,7 +152,13 @@ def classify(tok, model, prompts, batch_size=32):
             inp_len = inputs["input_ids"].shape[1]
             for out in outs:
                 first_id = out[inp_len].item()
-                preds.append(parse_answer(first_id, allow[0]))
+                pred = parse_answer(first_id, allow[0])
+                preds.append(pred)
+                prediction_counts[pred] += 1
+                
+                # 每50个样本打印一次统计
+                if len(preds) % 50 == 0:
+                    print(f"Current prediction stats: {prediction_counts}")
         except Exception as e:
             print("Batch error:", e)
             # 单条回退
@@ -156,10 +172,17 @@ def classify(tok, model, prompts, batch_size=32):
                         logits_processor=limiter,
                     )
                     first_id = out[0, ids["input_ids"].shape[1]].item()
-                    preds.append(parse_answer(first_id, allow[0]))
+                    pred = parse_answer(first_id, allow[0])
+                    preds.append(pred)
+                    prediction_counts[pred] += 1
                 except Exception as ie:
                     print("Single sample error:", ie)
                     preds.append("UNKNOWN")
+    
+    print("Final prediction distribution:")
+    print(f"SUPPORTED: {prediction_counts['SUPPORTED']}") 
+    print(f"REFUTED: {prediction_counts['REFUTED']}")
+    
     return preds
 
 
