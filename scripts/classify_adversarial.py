@@ -6,9 +6,14 @@
 import os, time, argparse, traceback
 import pandas as pd
 import torch
-from transformers import (AutoTokenizer, AutoModelForCausalLM,
-                          BitsAndBytesConfig, LogitsProcessor,
-                          LogitsProcessorList)
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    BitsAndBytesConfig,
+    LogitsProcessor,
+    LogitsProcessorList,
+)
+
 
 # ---------- 数据加载 ----------
 def load_data(file_path: str) -> pd.DataFrame:
@@ -22,24 +27,28 @@ def construct_prompts(df: pd.DataFrame):
     for idx, row in df.iterrows():
         o, a = row["original_samples"], row["adversarial_samples"]
         if not (isinstance(o, str) and isinstance(a, str)):
-            skipped.append(idx); continue
+            skipped.append(idx)
+            continue
         if "~" not in o or "~" not in a:
-            skipped.append(idx); continue
+            skipped.append(idx)
+            continue
 
         ev_o, cl_o = o.split("~", 1)
         ev_a, cl_a = a.split("~", 1)
 
-        tpl = ("Evidence: {}\n"
-               "Claim: {}\n"
-               "Question: Is this claim supported or refuted based on the evidence? "
-               "Answer ONLY “SUPPORTED” or “REFUTED” (no other words)\n"
-               "Answer:")
+        tpl = (
+            "Evidence: {}\n"
+            "Claim: {}\n"
+            "Question: Is this claim supported or refuted based on the evidence? "
+            "Answer ONLY “SUPPORTED” or “REFUTED” (no other words)\n"
+            "Answer:"
+        )
 
         orig.append(tpl.format(ev_o.strip(), cl_o.strip()))
-        adv.append (tpl.format(ev_a.strip(), cl_a.strip()))
+        adv.append(tpl.format(ev_a.strip(), cl_a.strip()))
 
     print(f"Total {len(df)} | Skipped {len(skipped)} | Valid {len(df)-len(skipped)}")
-    return orig, adv, skipped, len(df)-len(skipped)
+    return orig, adv, skipped, len(df) - len(skipped)
 
 
 # ---------- 模型加载 ----------
@@ -50,9 +59,9 @@ def load_model(model_name: str, token=None):
         print(f"GPU: {gpu.name}  {gpu.total_memory/1e9:.1f} GB")
         if "H100" in gpu.name:
             torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32  = True
+            torch.backends.cudnn.allow_tf32 = True
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token, cache_dir=os.environ["HF_HOME"])
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token, cache_dir=os.environ.get("HF_HOME", None))
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
@@ -63,7 +72,7 @@ def load_model(model_name: str, token=None):
         device_map="auto",
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         low_cpu_mem_usage=True,
-        cache_dir = os.environ["HF_HOME"]
+        cache_dir=os.environ["HF_HOME"],
     )
     model.eval()
     print("Model ready.")
@@ -73,7 +82,7 @@ def load_model(model_name: str, token=None):
 # ---------- 只允许两个 token 的 logits 处理器 ----------
 class TwoLabelLimiter(LogitsProcessor):
     def __init__(self, allow_ids):
-        self.allow = allow_ids          # list[int]
+        self.allow = allow_ids  # list[int]
 
     def __call__(self, input_ids, scores):
         mask = torch.full_like(scores, float("-inf"))
@@ -93,8 +102,8 @@ def classify(tok, model, prompts, batch_size=32):
 
     # H100 自动调批
     if torch.cuda.is_available():
-        mem = torch.cuda.get_device_properties(0).total_memory/1e9
-        batch_size = min(batch_size, int(mem)//2 or 1)
+        mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+        batch_size = min(batch_size, int(mem) // 2 or 1)
         print(f"Adjusted batch size: {batch_size}")
 
     # 准备允许 token id
@@ -107,7 +116,7 @@ def classify(tok, model, prompts, batch_size=32):
     limiter = LogitsProcessorList([TwoLabelLimiter(allow)])
 
     for i in range(0, len(prompts), batch_size):
-        batch = prompts[i:i+batch_size]
+        batch = prompts[i : i + batch_size]
         print(f"Batch {i//batch_size+1}/{(len(prompts)-1)//batch_size+1}")
 
         try:
@@ -119,7 +128,7 @@ def classify(tok, model, prompts, batch_size=32):
                     do_sample=False,
                     temperature=0.0,
                     pad_token_id=tok.eos_token_id,
-                    logits_processor=limiter
+                    logits_processor=limiter,
                 )
             inp_len = inputs["input_ids"].shape[1]
             for out in outs:
@@ -132,8 +141,11 @@ def classify(tok, model, prompts, batch_size=32):
                 try:
                     ids = tok(p, return_tensors="pt").to(device)
                     out = model.generate(
-                        **ids, max_new_tokens=1, do_sample=False,
-                        logits_processor=limiter)
+                        **ids,
+                        max_new_tokens=1,
+                        do_sample=False,
+                        logits_processor=limiter,
+                    )
                     first_id = out[0, ids["input_ids"].shape[1]].item()
                     preds.append(parse_answer(first_id, allow[0]))
                 except Exception as ie:
@@ -143,30 +155,30 @@ def classify(tok, model, prompts, batch_size=32):
 
 
 # ---------- 结果统计（与你原版一致） ----------
-def compare_results_with_accuracy(df, orig_preds, adv_preds,
-                                  valid_samples, model_name,
-                                  output_dir="./results"):
+def compare_results_with_accuracy(
+    df, orig_preds, adv_preds, valid_samples, model_name, output_dir="./results"
+):
 
-    df["original_prediction"]    = orig_preds
+    df["original_prediction"] = orig_preds
     df["adversarial_prediction"] = adv_preds
-    df["prediction_flipped"]     = df["original_prediction"] != df["adversarial_prediction"]
+    df["prediction_flipped"] = df["original_prediction"] != df["adversarial_prediction"]
     df["correct"] = df["original_prediction"] == df["correctness"].str.upper()
 
-    clean_acc   = df["correct"].mean() if len(df) else 0
-    total_flip  = df["prediction_flipped"].sum()
-    flip_rate   = total_flip / valid_samples if valid_samples else 0
+    clean_acc = df["correct"].mean() if len(df) else 0
+    total_flip = df["prediction_flipped"].sum()
+    flip_rate = total_flip / valid_samples if valid_samples else 0
 
-    df_correct  = df[df["correct"]]
-    flip_corr   = df_correct["prediction_flipped"].sum()
+    df_correct = df[df["correct"]]
+    flip_corr = df_correct["prediction_flipped"].sum()
     corr_flip_r = flip_corr / len(df_correct) if len(df_correct) else 0
 
     df_preserve = df[(df["agreed_labels"] == 0) & df["correct"]]
-    flip_pcorr  = df_preserve["prediction_flipped"].sum()
-    pcorr_r     = flip_pcorr / len(df_preserve) if len(df_preserve) else 0
+    flip_pcorr = df_preserve["prediction_flipped"].sum()
+    pcorr_r = flip_pcorr / len(df_preserve) if len(df_preserve) else 0
 
     os.makedirs(output_dir, exist_ok=True)
     short = model_name.split("/")[-1]
-    txt   = os.path.join(output_dir, f"{short}_results.txt")
+    txt = os.path.join(output_dir, f"{short}_results.txt")
 
     with open(txt, "w", encoding="utf-8") as f:
         f.write(f"===== {short} 分类结果 =====\n\n")
@@ -190,11 +202,16 @@ def compare_results_with_accuracy(df, orig_preds, adv_preds,
 
 def export_incorrect_predictions(df, model_name, out_dir="./results"):
     short = model_name.split("/")[-1]
-    path  = os.path.join(out_dir, f"{short}_misclassified.csv")
-    cols = ["original_samples", "adversarial_samples",
-            "original_prediction", "correctness"]
-    df[df["original_prediction"] != df["correctness"].str.upper()][cols] \
-        .to_csv(path, index=False)
+    path = os.path.join(out_dir, f"{short}_misclassified.csv")
+    cols = [
+        "original_samples",
+        "adversarial_samples",
+        "original_prediction",
+        "correctness",
+    ]
+    df[df["original_prediction"] != df["correctness"].str.upper()][cols].to_csv(
+        path, index=False
+    )
     print(f"Misclassified samples saved to {path}")
 
 
@@ -204,12 +221,14 @@ def main():
     parser.add_argument("--model", default="meta-llama/Llama-3.2-3B-Instruct")
     parser.add_argument("--token")
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--data_path", default="./data/adversarial_dataset_corrected.csv")
+    parser.add_argument(
+        "--data_path", default="./data/adversarial_dataset_corrected.csv"
+    )
     # parser.add_argument("--output_dir", default="./results")
     parser.add_argument(
-    "--output_dir",
-    default=os.path.join(os.environ.get("TMPDIR", "/tmp"), "results"),
-    help="模型输出结果目录（默认写入 TMPDIR/results）"
+        "--output_dir",
+        default=os.path.join(os.environ.get("TMPDIR", "/tmp"), "results"),
+        help="模型输出结果目录（默认写入 TMPDIR/results）",
     )
     args = parser.parse_args()
 
@@ -224,13 +243,15 @@ def main():
     a_preds = classify(tok, model, adv_p, args.batch_size)
 
     valid_df = df.drop(index=skipped).reset_index(drop=True)
-    res_df   = compare_results_with_accuracy(valid_df, o_preds, a_preds,
-                                             valid, args.model, args.output_dir)
+    res_df = compare_results_with_accuracy(
+        valid_df, o_preds, a_preds, valid, args.model, args.output_dir
+    )
     export_incorrect_predictions(res_df, args.model, args.output_dir)
 
     # 保存完整 CSV
-    full_path = os.path.join(args.output_dir,
-                             args.model.split("/")[-1] + "_full_results.csv")
+    full_path = os.path.join(
+        args.output_dir, args.model.split("/")[-1] + "_full_results.csv"
+    )
     res_df.to_csv(full_path, index=False)
     print(f"Full csv saved to {full_path}")
 
