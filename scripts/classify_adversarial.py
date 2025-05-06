@@ -13,6 +13,7 @@ from transformers import (
     LogitsProcessor,
     LogitsProcessorList,
 )
+from peft import PeftModel  # 添加PEFT支持
 
 
 # ---------- 数据加载 ----------
@@ -40,7 +41,7 @@ def construct_prompts(df: pd.DataFrame):
             "Evidence: {}\n"
             "Claim: {}\n"
             "Question: Is this claim supported or refuted based on the evidence? "
-            "Answer ONLY “SUPPORTED” or “REFUTED” (no other words)\n"
+            'Answer ONLY "SUPPORTED" or "REFUTED" (no other words)\n'
             "Answer:"
         )
 
@@ -52,16 +53,18 @@ def construct_prompts(df: pd.DataFrame):
 
 
 # ---------- 模型加载 ----------
-def load_model(model_name: str, token=None):
+def load_model(model_name: str, lora_path=None, token=None):
     print("Loading model …")
     if torch.cuda.is_available():
         gpu = torch.cuda.get_device_properties(0)
-        print(f"GPU: {gpu.name}  {gpu.total_memory/1e9:.1f} GB")
+        print(f"GPU: {gpu.name}  {gpu.total_memory/1e9:.1f} GB")
         if "H100" in gpu.name:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token, cache_dir=os.environ.get("HF_HOME", None))
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, use_auth_token=token, cache_dir=os.environ.get("HF_HOME", None)
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
@@ -72,8 +75,14 @@ def load_model(model_name: str, token=None):
         device_map="auto",
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         low_cpu_mem_usage=True,
-        cache_dir=os.environ["HF_HOME"],
+        cache_dir=os.environ.get("HF_HOME", None),
     )
+
+    # 如果提供了lora路径，则加载LoRA权重
+    if lora_path:
+        print(f"Loading LoRA weights from {lora_path}")
+        model = PeftModel.from_pretrained(model, lora_path)
+
     model.eval()
     print("Model ready.")
     return tokenizer, model
@@ -177,7 +186,8 @@ def compare_results_with_accuracy(
     pcorr_r = flip_pcorr / len(df_preserve) if len(df_preserve) else 0
 
     os.makedirs(output_dir, exist_ok=True)
-    short = model_name.split("/")[-1]
+    # 如果使用了LoRA权重，在文件名中添加标识
+    short = model_name.split("/")[-1] + ("_lora" if args.lora else "")
     txt = os.path.join(output_dir, f"{short}_results.txt")
 
     with open(txt, "w", encoding="utf-8") as f:
@@ -201,7 +211,8 @@ def compare_results_with_accuracy(
 
 
 def export_incorrect_predictions(df, model_name, out_dir="./results"):
-    short = model_name.split("/")[-1]
+    # 如果使用了LoRA权重，在文件名中添加标识
+    short = model_name.split("/")[-1] + ("_lora" if args.lora else "")
     path = os.path.join(out_dir, f"{short}_misclassified.csv")
     cols = [
         "original_samples",
@@ -219,6 +230,7 @@ def export_incorrect_predictions(df, model_name, out_dir="./results"):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="meta-llama/Llama-3.2-3B-Instruct")
+    parser.add_argument("--lora", help="LoRA权重目录路径")  # 添加LoRA参数
     parser.add_argument("--token")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument(
@@ -230,12 +242,13 @@ def main():
         default=os.path.join(os.environ.get("TMPDIR", "/tmp"), "results"),
         help="模型输出结果目录（默认写入 TMPDIR/results）",
     )
+    global args  # 使args全局可访问，用于文件名
     args = parser.parse_args()
 
     df = load_data(args.data_path)
     orig_p, adv_p, skipped, valid = construct_prompts(df)
 
-    tok, model = load_model(args.model, args.token)
+    tok, model = load_model(args.model, args.lora, args.token)  # 传递LoRA参数
 
     print("\nClassifying original …")
     o_preds = classify(tok, model, orig_p, args.batch_size)
@@ -249,8 +262,10 @@ def main():
     export_incorrect_predictions(res_df, args.model, args.output_dir)
 
     # 保存完整 CSV
+    # 如果使用了LoRA权重，在文件名中添加标识
+    model_name_with_suffix = args.model.split("/")[-1] + ("_lora" if args.lora else "")
     full_path = os.path.join(
-        args.output_dir, args.model.split("/")[-1] + "_full_results.csv"
+        args.output_dir, model_name_with_suffix + "_full_results.csv"
     )
     res_df.to_csv(full_path, index=False)
     print(f"Full csv saved to {full_path}")
