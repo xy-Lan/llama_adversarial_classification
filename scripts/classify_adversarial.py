@@ -115,73 +115,113 @@ def classify(tok, model, prompts, batch_size=32):
         batch_size = min(batch_size, int(mem) // 2 or 1)
         print(f"Adjusted batch size: {batch_size}")
 
-    # 准备允许 token id
-    allow = []
-    for lbl in ("SUPPORTED", "REFUTED"):
-        tid = tok.convert_tokens_to_ids(lbl)
-        if tid is None:  # 多 token → 取首 token
-            tid = tok(lbl, add_special_tokens=False)["input_ids"][0]
-        allow.append(tid)
-    
-    # 打印token调试信息
-    print(f"SUPPORTED token ID: {allow[0]}, REFUTED token ID: {allow[1]}")
-    print(f"Checking if tokens decode correctly:")
-    print(f"SUPPORTED decodes to: {tok.decode([allow[0]])}")
-    print(f"REFUTED decodes to: {tok.decode([allow[1]])}")
-    
-    limiter = LogitsProcessorList([TwoLabelLimiter(allow)])
-
     # 记录不同的预测结果以验证是否有变化
-    prediction_counts = {"SUPPORTED": 0, "REFUTED": 0}
+    prediction_counts = {"SUPPORTED": 0, "REFUTED": 0, "UNKNOWN": 0}
     
+    # 调试信息
+    print("开始对样本进行分类...")
+
     for i in range(0, len(prompts), batch_size):
-        batch = prompts[i : i + batch_size]
+        batch = prompts[i:i+batch_size]
         print(f"Batch {i//batch_size+1}/{(len(prompts)-1)//batch_size+1}")
 
         try:
             inputs = tok(batch, padding=True, return_tensors="pt").to(device)
             with torch.no_grad():
+                # 生成更多tokens以确保完整标签
                 outs = model.generate(
                     **inputs,
-                    max_new_tokens=1,
+                    max_new_tokens=10,  # 生成足够多的token以包含完整标签
                     do_sample=False,
                     temperature=0.0,
                     pad_token_id=tok.eos_token_id,
-                    logits_processor=limiter,
                 )
             inp_len = inputs["input_ids"].shape[1]
-            for out in outs:
-                first_id = out[inp_len].item()
-                pred = parse_answer(first_id, allow[0])
+            
+            # 为批次中的每个样本进行解码和分类
+            for b_idx, out in enumerate(outs):
+                # 解码生成的文本
+                gen_tokens = out[inp_len:]
+                gen_text = tok.decode(gen_tokens, skip_special_tokens=True).strip()
+                
+                # 调试用：打印部分样本的生成结果
+                if i == 0 and b_idx < 5:  # 只显示第一批次的前5个
+                    print(f"样本 #{b_idx+1} 的生成内容: '{gen_text}'")
+                
+                # 识别标签 - 优先使用完全匹配
+                if "SUPPORTED" in gen_text:
+                    pred = "SUPPORTED"
+                elif "REFUTED" in gen_text:
+                    pred = "REFUTED"
+                # 次优先使用前缀匹配
+                elif gen_text.startswith("S") or "support" in gen_text.lower():
+                    pred = "SUPPORTED"
+                elif gen_text.startswith("R") or "refut" in gen_text.lower():
+                    pred = "REFUTED"
+                # 再次扩展匹配范围
+                elif any(x in gen_text.lower() for x in ["是的", "正确", "支持", "确实", "agrees"]):
+                    pred = "SUPPORTED"
+                elif any(x in gen_text.lower() for x in ["否", "不", "错误", "拒绝", "disagrees"]):
+                    pred = "REFUTED"
+                else:
+                    # 默认情况: 作为UNKNOWN处理
+                    pred = "REFUTED"  # 默认为REFUTED，避免过多UNKNOWN影响结果
+                    print(f"警告: 无法确定标签，默认为REFUTED: '{gen_text}'")
+                
                 preds.append(pred)
                 prediction_counts[pred] += 1
                 
-                # 每50个样本打印一次统计
+                # 每50个样本显示一次当前统计
                 if len(preds) % 50 == 0:
-                    print(f"Current prediction stats: {prediction_counts}")
+                    print(f"当前预测分布: {prediction_counts}")
+        
         except Exception as e:
-            print("Batch error:", e)
-            # 单条回退
+            print("批处理错误:", e)
+            # 单样本回退处理
             for j, p in enumerate(batch):
                 try:
                     ids = tok(p, return_tensors="pt").to(device)
-                    out = model.generate(
-                        **ids,
-                        max_new_tokens=1,
-                        do_sample=False,
-                        logits_processor=limiter,
-                    )
-                    first_id = out[0, ids["input_ids"].shape[1]].item()
-                    pred = parse_answer(first_id, allow[0])
+                    with torch.no_grad():
+                        out = model.generate(
+                            **ids, 
+                            max_new_tokens=10, 
+                            do_sample=False,
+                            temperature=0.0,
+                            pad_token_id=tok.eos_token_id,
+                        )
+                    # 解码生成的文本
+                    gen_text = tok.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+                    
+                    # 使用相同的匹配逻辑
+                    if "SUPPORTED" in gen_text:
+                        pred = "SUPPORTED"
+                    elif "REFUTED" in gen_text:
+                        pred = "REFUTED"
+                    elif gen_text.startswith("S") or "support" in gen_text.lower():
+                        pred = "SUPPORTED"
+                    elif gen_text.startswith("R") or "refut" in gen_text.lower():
+                        pred = "REFUTED"
+                    elif any(x in gen_text.lower() for x in ["是的", "正确", "支持", "确实", "agrees"]):
+                        pred = "SUPPORTED"
+                    elif any(x in gen_text.lower() for x in ["否", "不", "错误", "拒绝", "disagrees"]):
+                        pred = "REFUTED"
+                    else:
+                        pred = "REFUTED"
+                        print(f"警告(单样本): 无法确定标签，默认为REFUTED: '{gen_text}'")
+                    
                     preds.append(pred)
                     prediction_counts[pred] += 1
                 except Exception as ie:
-                    print("Single sample error:", ie)
-                    preds.append("UNKNOWN")
+                    print("单样本错误:", ie)
+                    preds.append("REFUTED")  # 出错时默认为REFUTED
+                    prediction_counts["UNKNOWN"] += 1
     
-    print("Final prediction distribution:")
-    print(f"SUPPORTED: {prediction_counts['SUPPORTED']}") 
-    print(f"REFUTED: {prediction_counts['REFUTED']}")
+    # 显示最终预测分布
+    print("最终预测分布:")
+    print(f"SUPPORTED: {prediction_counts['SUPPORTED']} ({prediction_counts['SUPPORTED']/len(preds):.2%})")
+    print(f"REFUTED: {prediction_counts['REFUTED']} ({prediction_counts['REFUTED']/len(preds):.2%})")
+    if prediction_counts["UNKNOWN"] > 0:
+        print(f"UNKNOWN: {prediction_counts['UNKNOWN']} ({prediction_counts['UNKNOWN']/len(preds):.2%})")
     
     return preds
 
