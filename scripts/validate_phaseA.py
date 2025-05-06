@@ -8,6 +8,7 @@ BASE = "meta-llama/Llama-3.2-1B-Instruct"  # 换成 1B / 8B 亦可
 LORA = "./phaseA_llama3"  # 你的输出目录
 
 tok = AutoTokenizer.from_pretrained(BASE, use_fast=False)
+tok.pad_token = tok.eos_token
 base = AutoModelForCausalLM.from_pretrained(BASE, device_map="auto")
 model = PeftModel.from_pretrained(base, LORA).merge_and_unload()
 model.eval()
@@ -38,13 +39,20 @@ gold = ["SUPPORTED" if l == "SUPPORTS" else "REFUTED" for l in dev["label"]]
 def batch_predict(prompts, bs=64):
     preds = []
     for i in range(0, len(prompts), bs):
-        sub = tok(prompts[i:i + bs], padding=True, truncation=True,
-                  max_length=512, return_tensors="pt").to(model.device)
+        sub = tok(
+            prompts[i : i + bs],
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors="pt",
+        ).to(model.device)
         with torch.no_grad():
             logits = model(**sub).logits[:, -1]  # 不用 generate
         idx = logits.argmax(-1).tolist()
-        preds += ["SUPPORTED" if j == tok.convert_tokens_to_ids('SUPPORTED') else "REFUTED"
-                  for j in idx]
+        preds += [
+            "SUPPORTED" if j == tok.convert_tokens_to_ids("SUPPORTED") else "REFUTED"
+            for j in idx
+        ]
     return preds
 
 
