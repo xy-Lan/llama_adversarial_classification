@@ -52,8 +52,15 @@ def to_prompt(r):
     )
 
 
-prompts = list(map(to_prompt, dev))
-gold = ["SUPPORTED" if l == "SUPPORTS" else "REFUTED" for l in dev["label"]]
+# Take only the first 1000 samples from the dev set
+num_samples_to_validate = 1000
+dev_subset = dev.select(range(min(num_samples_to_validate, len(dev))))
+print(
+    f"\n--- Running validation on the first {len(dev_subset)} samples of the dev set. ---\n"
+)
+
+prompts = list(map(to_prompt, dev_subset))
+gold = ["SUPPORTED" if l == "SUPPORTS" else "REFUTED" for l in dev_subset["label"]]
 
 
 # ---------- batched prediction using model.generate() ----------
