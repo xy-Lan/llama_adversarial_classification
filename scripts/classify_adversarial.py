@@ -514,6 +514,14 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
         print(
             f"Flip Rate (for Meaning-Preserving & Correctly Classified Originals): {robust_flip_rate:.2%} ({flips_in_correct_and_mp}/{num_correct_and_mp})"
         )
+        # 新增：Meaning-Preserving Flips / Meaning-Preserving & Correctly Classified Original Samples
+        if num_correct_and_mp > 0:
+            mp_flip_rate_targeted = flips_in_meaning_preserving / num_correct_and_mp
+        else:
+            mp_flip_rate_targeted = float('nan')
+        print(
+            f"Targeted MP Flip Rate (Meaning-Preserving Flips / MP & Correctly Classified Originals): {mp_flip_rate_targeted:.2%} ({flips_in_meaning_preserving}/{num_correct_and_mp})"
+        )
     else:
         print(
             "Robust Flip Rate metrics: Not calculated ('correctness' column missing)."
@@ -645,4 +653,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+        main()
