@@ -74,21 +74,27 @@ def construct_prompts(df):
             skipped_samples.append(index)
             continue
 
-        # 构建原始和对抗性 Prompts - 使用与CPU版本完全相同的格式
+        # 构建原始和对抗性 Prompts - 专为Llama 3.2优化的格式
         evidence_original, claim_original = original_parts
         evidence_adversarial, claim_adversarial = adversarial_parts
 
+        # 使用Llama 3.2适用的清晰指令格式
         original_prompt = (
+            "<|begin_of_text|><|user|>\n"
             f"Evidence: {evidence_original.strip()}\n"
             f"Claim: {claim_original.strip()}\n"
-            "Question: Is this claim supported or refuted based on the evidence?\n"
-            "Answer:"
+            "Is this claim supported or refuted based on the evidence? Answer with only one word: SUPPORTED or REFUTED.\n"
+            "<|end_of_text|>\n"
+            "<|assistant|>\n"
         )
+
         adversarial_prompt = (
+            "<|begin_of_text|><|user|>\n"
             f"Evidence: {evidence_adversarial.strip()}\n"
             f"Claim: {claim_adversarial.strip()}\n"
-            "Question: Is this claim supported or refuted based on the evidence?\n"
-            "Answer:"
+            "Is this claim supported or refuted based on the evidence? Answer with only one word: SUPPORTED or REFUTED.\n"
+            "<|end_of_text|>\n"
+            "<|assistant|>\n"
         )
 
         original_prompts.append(original_prompt)
@@ -142,6 +148,11 @@ def load_model(model_name, token=None):
     # 加载tokenizer
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token)
+
+    # 重要：设置左侧填充以解决批处理问题
+    tokenizer.padding_side = "left"
+
+    # 确保pad token存在
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -201,7 +212,7 @@ def classify_samples(tokenizer, model, prompts, batch_size=8):
         batch_start = time.time()
 
         try:
-            # 使用padding处理批次
+            # 使用padding处理批次 - 确保左侧填充
             inputs = tokenizer(batch, padding=True, return_tensors="pt").to(device)
 
             with torch.no_grad():
@@ -209,24 +220,25 @@ def classify_samples(tokenizer, model, prompts, batch_size=8):
                     **inputs,
                     max_new_tokens=10,  # 只生成少量token
                     do_sample=False,
-                    temperature=0.0,
-                    pad_token_id=tokenizer.eos_token_id,
+                    temperature=None,  # 移除不必要的温度设置
+                    top_p=None,  # 移除不必要的top_p设置
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
                 )
 
             # 处理每个输出
             for j, output in enumerate(outputs):
                 # 获取输入长度以找到生成的部分
-                input_length = inputs.input_ids[j].size(0)
+                input_length = inputs.input_ids.shape[1]  # 修正输入长度计算
                 generated_tokens = output[input_length:]
 
                 # 解码生成的文本
                 generated_text = tokenizer.decode(
                     generated_tokens, skip_special_tokens=True
-                )
-                full_text = batch[j] + generated_text
+                ).strip()
 
                 # 解析答案
-                prediction = parse_answer(full_text)
+                prediction = parse_answer(generated_text)
                 predictions.append(prediction)
 
                 # 打印首批样本的详细信息
@@ -234,7 +246,6 @@ def classify_samples(tokenizer, model, prompts, batch_size=8):
                     print(f"  Sample {j+1}:")
                     print(f"    Prompt: {batch[j]}")
                     print(f"    Generated: {generated_text}")
-                    print(f"    Full text: {full_text}")
                     print(f"    Prediction: {prediction}")
 
             # 计算并显示批处理速度
@@ -254,17 +265,20 @@ def classify_samples(tokenizer, model, prompts, batch_size=8):
                     inputs = tokenizer(prompt, return_tensors="pt").to(device)
                     with torch.no_grad():
                         output = model.generate(
-                            **inputs, max_new_tokens=10, do_sample=False
+                            **inputs,
+                            max_new_tokens=10,
+                            do_sample=False,
+                            temperature=None,
+                            top_p=None,
                         )
 
                     # 解码生成的文本
                     generated_text = tokenizer.decode(
                         output[0, inputs.input_ids.shape[1] :], skip_special_tokens=True
-                    )
-                    full_text = prompt + generated_text
+                    ).strip()
 
                     # 解析答案
-                    prediction = parse_answer(full_text)
+                    prediction = parse_answer(generated_text)
                     predictions.append(prediction)
 
                 except Exception as inner_e:
@@ -300,26 +314,48 @@ def classify_samples(tokenizer, model, prompts, batch_size=8):
 
 def parse_answer(output_text):
     """解析模型输出，提取SUPPORTED或REFUTED标签"""
-    # 提取模型生成的答案部分
-    answer_part = output_text.split("Answer:")[-1].strip().upper()
+    # 清理和标准化输出文本
+    text = output_text.upper().strip()
 
-    # 更严格的模式匹配
-    if "SUPPORTED" in answer_part and "NOT SUPPORTED" not in answer_part:
+    # 首先检查最简单的完全匹配情况
+    if text == "SUPPORTED":
         return "SUPPORTED"
-    elif "REFUTED" in answer_part:
+    elif text == "REFUTED":
         return "REFUTED"
-    else:
-        # 尝试更灵活的匹配
-        if any(word in answer_part for word in ["SUPPORT", "YES", "TRUE", "CORRECT"]):
-            return "SUPPORTED"
-        elif any(
-            word in answer_part for word in ["REFUTE", "NO", "FALSE", "INCORRECT"]
-        ):
-            return "REFUTED"
-        else:
-            # 输出未识别的答案以便调试
-            print(f"Unrecognized answer: '{answer_part}'")
-            return "UNKNOWN"
+
+    # 检查文本中是否包含关键词 - 先搜索更精确的匹配
+    if "SUPPORTED" in text and "NOT SUPPORTED" not in text:
+        return "SUPPORTED"
+    elif "REFUTED" in text:
+        return "REFUTED"
+
+    # 更宽松的匹配 - 防止可能出现的格式变化
+    if "SUPPORT" in text and not any(
+        neg in text for neg in ["NOT SUPPORT", "DOESN'T SUPPORT", "DOES NOT SUPPORT"]
+    ):
+        return "SUPPORTED"
+    elif any(
+        word in text
+        for word in ["REFUTE", "NOT SUPPORT", "DOESN'T SUPPORT", "DOES NOT SUPPORT"]
+    ):
+        return "REFUTED"
+
+    # 处理前缀为"THE CLAIM IS"或者其他常见格式的回答
+    if "THE CLAIM IS SUPPORTED" in text or "THIS CLAIM IS SUPPORTED" in text:
+        return "SUPPORTED"
+    elif "THE CLAIM IS REFUTED" in text or "THIS CLAIM IS REFUTED" in text:
+        return "REFUTED"
+
+    # 如果以上都不匹配，检查其他指示词
+    if any(word in text for word in ["CORRECT", "TRUE", "YES", "ACCURATE"]):
+        return "SUPPORTED"
+    elif any(word in text for word in ["INCORRECT", "FALSE", "NO", "INACCURATE"]):
+        return "REFUTED"
+
+    # 调试未识别的答案
+    if text:  # 仅当有实际文本时才打印
+        print(f"Unrecognized answer: '{text}'")
+    return "UNKNOWN"
 
 
 def compare_results(df, original_predictions, adversarial_predictions, valid_samples):
