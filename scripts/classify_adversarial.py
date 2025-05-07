@@ -5,11 +5,17 @@ import torch
 import os
 import argparse
 from transformers import AutoTokenizer, AutoModelForCausalLM
+import time
 
 
-def load_data(file_path):
-    # 与原CPU版本保持一致，只加载前50行数据
-    df = pd.read_csv(file_path, nrows=50)
+def load_data(file_path, nrows=None):
+    """加载数据，支持加载部分或全部数据"""
+    if nrows is not None:
+        df = pd.read_csv(file_path, nrows=nrows)
+        print(f"Loaded {nrows} rows from {file_path}")
+    else:
+        df = pd.read_csv(file_path)
+        print(f"Loaded all {len(df)} rows from {file_path}")
     return df
 
 
@@ -104,34 +110,62 @@ def construct_prompts(df):
 
 
 def load_model(model_name, token=None):
+    """加载模型和分词器，支持多种加载选项"""
     print("Loading model...")
 
-    # 检查是否有GPU可用
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # 检查GPU可用性
     if torch.cuda.is_available():
         gpu = torch.cuda.get_device_properties(0)
-        print(f"GPU: {gpu.name}  {gpu.total_memory/1e9:.1f} GB")
+        print(f"GPU: {gpu.name} - {gpu.total_memory/1e9:.2f} GB")
+
+        # 对高端GPU启用TF32
+        if any(
+            gpu_type in gpu.name for gpu_type in ["A100", "H100", "A6000", "RTX 4090"]
+        ):
+            print("High-end GPU detected, enabling TF32 precision")
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+
+        # 根据GPU内存确定量化参数
+        mem_gb = gpu.total_memory / 1e9
+        use_4bit = mem_gb < 24  # 小内存GPU使用4bit量化
+        use_8bit = 24 <= mem_gb < 40 and not use_4bit  # 中等内存使用8bit
+        print(f"Memory optimization: 4bit={use_4bit}, 8bit={use_8bit}")
     else:
-        print("GPU not available, using CPU for inference.")
+        print("GPU not available, using CPU")
+        use_4bit = False
+        use_8bit = False
 
-    # 加载tokenizer - 保持简单，与CPU版本一致
+    # 准备模型配置
+    model_kwargs = {
+        "use_auth_token": token,
+        "device_map": "auto",
+        "torch_dtype": torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+    }
+
+    # 加载tokenizer
+    print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-    # 加载模型 - 使用更直接的方式，与CPU版本更接近
-    print(f"Loading model...")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        use_auth_token=token,
-        torch_dtype=torch.float32,  # 使用与CPU版本相同的精度
-    )
+    # 加载模型
+    try:
+        print(f"Loading model with config: {model_kwargs}")
+        model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        print("Falling back to basic loading...")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, use_auth_token=token, torch_dtype=torch.float32
+        )
+        if torch.cuda.is_available():
+            model = model.to("cuda")
 
-    # 使用标准的PyTorch方式将模型移动到设备
-    model = model.to(device)
+    # 设置评估模式
     model.eval()
-
-    # 验证模型确实在正确的设备上
-    device_check = next(model.parameters()).device
-    print(f"Model loaded successfully on {device_check}!")
+    device = next(model.parameters()).device
+    print(f"Model loaded successfully on {device}")
 
     return tokenizer, model
 
@@ -140,103 +174,123 @@ def classify_samples(tokenizer, model, prompts, batch_size=8):
     predictions = []
     device = next(model.parameters()).device
 
-    # 检测是否使用批处理
-    use_batch = batch_size > 1
+    # 如果有GPU，调整批处理大小
+    if torch.cuda.is_available():
+        mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+        batch_size = min(batch_size, max(1, int(mem) // 2))
+        print(f"Using batch size: {batch_size}")
 
-    if use_batch:
-        print(f"Using batch processing with batch size: {batch_size}")
-    else:
-        print("Using single sample processing")
+    # 批量处理
+    for i in range(0, len(prompts), batch_size):
+        batch = prompts[i : i + batch_size]
+        print(
+            f"Processing batch {i//batch_size + 1}/{(len(prompts)-1)//batch_size + 1}"
+        )
 
-    # 如果使用批处理
-    if use_batch:
-        for i in range(0, len(prompts), batch_size):
-            batch = prompts[i : i + batch_size]
-            batch_size_actual = len(batch)  # 实际批次大小
-            print(
-                f"Processing batch {i//batch_size + 1}/{(len(prompts)-1)//batch_size + 1}"
-            )
-
-            try:
-                # 真正的批处理 - 一起编码和处理所有样本
-                inputs = tokenizer(batch, padding=True, return_tensors="pt").to(device)
-
-                with torch.no_grad():
-                    # 注意这里需要使用类似的生成参数
-                    outputs = model.generate(
-                        **inputs,
-                        max_length=inputs.input_ids.shape[1] + 10,  # 与单样本版本一致
-                        do_sample=False,
-                        pad_token_id=tokenizer.eos_token_id,
-                    )
-
-                # 对每个样本处理结果
-                for j in range(batch_size_actual):
-                    # 打印和单样本版本相同的信息
-                    print(f"Processing prompt {i+j+1}/{len(prompts)}: {batch[j]}")
-
-                    # 解码完整输出
-                    output_text = tokenizer.decode(outputs[j], skip_special_tokens=True)
-                    prediction = parse_answer(output_text)
-                    predictions.append(prediction)
-                    print(f"Prediction for prompt {i+j+1}: {prediction}")
-
-            except Exception as e:
-                print(f"Batch processing error: {e}")
-                print("Falling back to single sample processing for this batch")
-
-                # 单样本回退处理
-                for j, prompt in enumerate(batch):
-                    print(f"Processing prompt {i+j+1}/{len(prompts)}: {prompt}")
-
-                    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-
-                    with torch.no_grad():
-                        output_ids = model.generate(
-                            input_ids=input_ids,
-                            max_length=input_ids.shape[1] + 10,
-                            do_sample=False,
-                        )
-
-                    output_text = tokenizer.decode(
-                        output_ids[0], skip_special_tokens=True
-                    )
-                    prediction = parse_answer(output_text)
-                    predictions.append(prediction)
-                    print(f"Prediction for prompt {i+j+1}: {prediction}")
-
-    # 如果不使用批处理，使用原始单样本方式
-    else:
-        for i, prompt in enumerate(prompts):
-            print(f"Processing prompt {i + 1}/{len(prompts)}: {prompt}")
-
-            input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+        try:
+            # 使用padding处理批次
+            inputs = tokenizer(batch, padding=True, return_tensors="pt").to(device)
 
             with torch.no_grad():
-                output_ids = model.generate(
-                    input_ids=input_ids,
-                    max_length=input_ids.shape[1] + 10,
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=10,  # 只生成少量token
                     do_sample=False,
+                    temperature=0.0,
+                    pad_token_id=tokenizer.eos_token_id,
                 )
 
-            output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-            prediction = parse_answer(output_text)
-            predictions.append(prediction)
-            print(f"Prediction for prompt {i + 1}: {prediction}")
+            # 处理每个输出
+            for j, output in enumerate(outputs):
+                # 获取输入长度以找到生成的部分
+                input_length = inputs.input_ids[j].size(0)
+                generated_tokens = output[input_length:]
+
+                # 解码生成的文本
+                generated_text = tokenizer.decode(
+                    generated_tokens, skip_special_tokens=True
+                )
+                full_text = batch[j] + generated_text
+
+                # 解析答案
+                prediction = parse_answer(full_text)
+                predictions.append(prediction)
+
+                # 打印详情
+                print(f"Prediction for sample {i+j+1}: {prediction}")
+
+                # 打印前几个样本的详细信息
+                if i == 0 and j < 3:
+                    print(f"  Sample {j+1}:")
+                    print(f"    Prompt: {batch[j]}")
+                    print(f"    Generated: {generated_text}")
+                    print(f"    Full text: {full_text}")
+
+        except Exception as e:
+            print(f"Error in batch processing: {e}")
+            # 单条回退
+            for j, prompt in enumerate(batch):
+                try:
+                    print(f"Processing individual prompt {i+j+1}")
+                    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+                    with torch.no_grad():
+                        output = model.generate(
+                            **inputs, max_new_tokens=10, do_sample=False
+                        )
+
+                    # 解码生成的文本
+                    generated_text = tokenizer.decode(
+                        output[0, inputs.input_ids.shape[1] :], skip_special_tokens=True
+                    )
+                    full_text = prompt + generated_text
+
+                    # 解析答案
+                    prediction = parse_answer(full_text)
+                    predictions.append(prediction)
+                    print(f"Prediction for sample {i+j+1}: {prediction}")
+
+                except Exception as inner_e:
+                    print(f"Error in single sample processing: {inner_e}")
+                    predictions.append("UNKNOWN")
+
+    # 打印预测分布
+    supported_count = predictions.count("SUPPORTED")
+    refuted_count = predictions.count("REFUTED")
+    unknown_count = predictions.count("UNKNOWN")
+
+    print(f"\nPrediction distribution:")
+    print(
+        f"  SUPPORTED: {supported_count} ({supported_count/len(predictions)*100:.1f}%)"
+    )
+    print(f"  REFUTED: {refuted_count} ({refuted_count/len(predictions)*100:.1f}%)")
+    if unknown_count > 0:
+        print(f"  UNKNOWN: {unknown_count} ({unknown_count/len(predictions)*100:.1f}%)")
 
     return predictions
 
 
 def parse_answer(output_text):
-    # 提取模型生成的答案部分 - 与CPU版本完全相同的处理逻辑
-    answer = output_text.split("Answer:")[-1].strip().upper()
-    if "SUPPORTED" in answer:
+    """解析模型输出，提取SUPPORTED或REFUTED标签"""
+    # 提取模型生成的答案部分
+    answer_part = output_text.split("Answer:")[-1].strip().upper()
+
+    # 更严格的模式匹配
+    if "SUPPORTED" in answer_part and "NOT SUPPORTED" not in answer_part:
         return "SUPPORTED"
-    elif "REFUTED" in answer:
+    elif "REFUTED" in answer_part:
         return "REFUTED"
     else:
-        print("Answer is ", answer)  # 与CPU版本相同的输出
-        return "UNKNOWN"
+        # 尝试更灵活的匹配
+        if any(word in answer_part for word in ["SUPPORT", "YES", "TRUE", "CORRECT"]):
+            return "SUPPORTED"
+        elif any(
+            word in answer_part for word in ["REFUTE", "NO", "FALSE", "INCORRECT"]
+        ):
+            return "REFUTED"
+        else:
+            # 输出未识别的答案以便调试
+            print(f"Unrecognized answer: '{answer_part}'")
+            return "UNKNOWN"
 
 
 def compare_results(df, original_predictions, adversarial_predictions, valid_samples):
@@ -288,62 +342,67 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
 
 def main():
     # 命令行参数
-    parser = argparse.ArgumentParser(
-        description="Classify FEVER dataset with Llama model"
-    )
+    parser = argparse.ArgumentParser(description="分类FEVER数据集中的对抗样本")
     parser.add_argument(
-        "--model", default="meta-llama/Llama-3.2-1B-Instruct", help="Model name or path"
+        "--model", default="meta-llama/Llama-3.2-1B-Instruct", help="模型名称或路径"
     )
-    parser.add_argument("--token", help="Hugging Face token")
+    parser.add_argument("--token", help="Hugging Face访问令牌")
     parser.add_argument(
         "--data_path",
         default="./data/adversarial_dataset_corrected.csv",
-        help="Path to dataset",
+        help="数据集路径",
     )
     parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=1,
-        help="Batch size (使用1表示单样本处理，大于1启用批处理)",
+        "--batch_size", type=int, default=8, help="批处理大小 (默认: 8)"
+    )
+    parser.add_argument("--output_dir", default="./results", help="结果输出目录")
+    parser.add_argument(
+        "--nrows", type=int, default=50, help="加载的行数 (默认: 50，设为0加载全部)"
     )
     parser.add_argument(
-        "--output_dir", default="./results", help="Directory to save results"
+        "--save_predictions", action="store_true", help="保存每个样本的预测结果"
     )
-    parser.add_argument(
-        "--full_dataset", action="store_true", help="处理完整数据集而不是前50行"
-    )
+    parser.add_argument("--verbose", action="store_true", help="输出详细日志")
     args = parser.parse_args()
 
     # 确保输出目录存在
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # 设置日志级别
+    if args.verbose:
+        print("启用详细日志模式")
+
     # 加载数据
-    if args.full_dataset:
-        df = pd.read_csv(args.data_path)
-        print("Processing full dataset")
-    else:
-        df = load_data(args.data_path)
-        print("Processing first 50 samples only (use --full_dataset to process all)")
+    df = load_data(args.data_path, args.nrows if args.nrows > 0 else None)
 
     # 构建提示
+    start_time = time.time()
     original_prompts, adversarial_prompts, skipped_samples, valid_samples = (
         construct_prompts(df)
     )
+    prep_time = time.time() - start_time
+    print(f"提示构建完成，耗时 {prep_time:.2f} 秒")
 
     # 加载模型
     tokenizer, model = load_model(args.model, args.token)
 
     # 对原始样本进行分类
-    print("\nClassifying original samples...")
+    print("\n分类原始样本...")
+    orig_start = time.time()
     original_predictions = classify_samples(
         tokenizer, model, original_prompts, args.batch_size
     )
+    orig_time = time.time() - orig_start
+    print(f"原始样本分类完成，耗时 {orig_time:.2f} 秒")
 
     # 对对抗性样本进行分类
-    print("\nClassifying adversarial samples...")
+    print("\n分类对抗性样本...")
+    adv_start = time.time()
     adversarial_predictions = classify_samples(
         tokenizer, model, adversarial_prompts, args.batch_size
     )
+    adv_time = time.time() - adv_start
+    print(f"对抗样本分类完成，耗时 {adv_time:.2f} 秒")
 
     # 移除被跳过的样本
     valid_df = df.drop(index=skipped_samples).reset_index(drop=True)
@@ -353,14 +412,45 @@ def main():
         valid_df, original_predictions, adversarial_predictions, valid_samples
     )
 
+    # 输出性能统计
+    total_time = time.time() - start_time
+    samples_per_sec = valid_samples / (orig_time + adv_time)
+    print(f"\n性能统计:")
+    print(f"  总处理时间: {total_time:.2f} 秒")
+    print(f"  样本处理速度: {samples_per_sec:.2f} 样本/秒")
+
     # 保存结果
     model_name_short = args.model.split("/")[-1]
-    batch_info = f"_batch{args.batch_size}" if args.batch_size > 1 else ""
+    batch_info = f"_batch{args.batch_size}"
+    sample_info = f"_n{args.nrows}" if args.nrows > 0 else "_full"
     result_path = os.path.join(
-        args.output_dir, f"{model_name_short}{batch_info}_results.csv"
+        args.output_dir, f"{model_name_short}{batch_info}{sample_info}_results.csv"
     )
     result_df.to_csv(result_path, index=False)
-    print(f"Results saved to {result_path}")
+    print(f"结果已保存到 {result_path}")
+
+    # 可选：保存每个样本的预测结果
+    if args.save_predictions:
+        pred_path = os.path.join(
+            args.output_dir,
+            f"{model_name_short}{batch_info}{sample_info}_predictions.csv",
+        )
+        pred_df = pd.DataFrame(
+            {
+                "original_prompt": original_prompts,
+                "adversarial_prompt": adversarial_prompts,
+                "original_prediction": original_predictions,
+                "adversarial_prediction": adversarial_predictions,
+                "flipped": [
+                    o != a
+                    for o, a in zip(original_predictions, adversarial_predictions)
+                ],
+            }
+        )
+        pred_df.to_csv(pred_path, index=False)
+        print(f"预测详情已保存到 {pred_path}")
+
+    return result_df
 
 
 if __name__ == "__main__":
