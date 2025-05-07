@@ -7,6 +7,7 @@ import argparse
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import time
 from tqdm import tqdm
+from peft import PeftModel
 
 
 def load_data(file_path):
@@ -112,8 +113,8 @@ def construct_prompts(df):
     return original_prompts, adversarial_prompts, skipped_samples, valid_samples
 
 
-def load_model(model_name, token=None):
-    """加载模型和分词器，支持多种加载选项"""
+def load_model(model_name, token=None, lora_path=None):
+    """加载模型和分词器，支持多种加载选项，包括LoRA"""
     print("Loading model...")
 
     # 检查GPU可用性
@@ -147,7 +148,7 @@ def load_model(model_name, token=None):
     }
 
     # 加载tokenizer
-    print("Loading tokenizer...")
+    print(f"Loading tokenizer for base model: {model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token)
 
     # 重要：设置左侧填充以解决批处理问题
@@ -157,23 +158,41 @@ def load_model(model_name, token=None):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # 加载模型
+    # 加载基础模型
     try:
-        print(f"Loading model with config: {model_kwargs}")
+        print(f"Loading base model: {model_name} with config: {model_kwargs}")
         model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
     except Exception as e:
-        print(f"Error loading model: {e}")
-        print("Falling back to basic loading...")
+        print(f"Error loading base model: {e}")
+        print("Falling back to basic loading for base model...")
         model = AutoModelForCausalLM.from_pretrained(
             model_name, use_auth_token=token, torch_dtype=torch.float32
         )
         if torch.cuda.is_available():
             model = model.to("cuda")
 
+    # 如果提供了LoRA路径，则加载并合并LoRA权重
+    if lora_path:
+        print(f"LoRA path provided: {lora_path}")
+        if not os.path.exists(lora_path):
+            print(
+                f"Warning: LoRA path {lora_path} does not exist. Using base model only."
+            )
+        else:
+            try:
+                print(f"Loading and merging LoRA weights from {lora_path}...")
+                model = PeftModel.from_pretrained(model, lora_path)
+                model = model.merge_and_unload()
+                print("LoRA weights merged successfully.")
+            except Exception as e:
+                print(
+                    f"Error loading or merging LoRA weights: {e}. Using base model only."
+                )
+
     # 设置评估模式
     model.eval()
     device = next(model.parameters()).device
-    print(f"Model loaded successfully on {device}")
+    print(f"Model (final) loaded successfully on {device}")
 
     return tokenizer, model
 
@@ -525,7 +544,14 @@ def main():
         description="Classify FEVER dataset with Llama model"
     )
     parser.add_argument(
-        "--model", default="meta-llama/Llama-3.2-1B-Instruct", help="Model name or path"
+        "--model",
+        default="meta-llama/Llama-3.2-1B-Instruct",
+        help="Base model name or path",
+    )
+    parser.add_argument(
+        "--lora_path",
+        default=None,
+        help="Path to LoRA adapter (fine-tuned model weights)",
     )
     parser.add_argument("--token", help="Hugging Face token")
     parser.add_argument(
@@ -560,7 +586,9 @@ def main():
         print(f"Processing full dataset: {len(df)} samples")
     else:
         df = load_data(args.data_path)
-        print(f"Processing first 50 samples only (use --full_dataset to process all)")
+        print(
+            f"Processing first 50 samples by default (use --full_dataset to process all, or modify load_data)"
+        )
 
     # 构建提示
     original_prompts, adversarial_prompts, skipped_samples, valid_samples = (
@@ -570,7 +598,7 @@ def main():
     print(f"Prompt preparation completed in {prep_time:.2f}s")
 
     # 加载模型
-    tokenizer, model = load_model(args.model, args.token)
+    tokenizer, model = load_model(args.model, args.token, args.lora_path)
 
     # 对原始样本进行分类
     print("\nClassifying original samples...")
