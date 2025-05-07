@@ -8,7 +8,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
 def load_data(file_path):
-    df = pd.read_csv(file_path)
+    # 与原CPU版本保持一致，只加载前50行数据
+    df = pd.read_csv(file_path, nrows=50)
     return df
 
 
