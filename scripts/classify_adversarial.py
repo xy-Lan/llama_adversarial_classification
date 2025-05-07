@@ -5,17 +5,11 @@ import torch
 import os
 import argparse
 from transformers import AutoTokenizer, AutoModelForCausalLM
-import time
 
 
-def load_data(file_path, nrows=None):
-    """加载数据，支持加载部分或全部数据"""
-    if nrows is not None:
-        df = pd.read_csv(file_path, nrows=nrows)
-        print(f"Loaded {nrows} rows from {file_path}")
-    else:
-        df = pd.read_csv(file_path)
-        print(f"Loaded all {len(df)} rows from {file_path}")
+def load_data(file_path):
+    # 与原CPU版本保持一致，只加载前50行数据
+    df = pd.read_csv(file_path, nrows=50)
     return df
 
 
@@ -274,21 +268,22 @@ def parse_answer(output_text):
     # 提取模型生成的答案部分
     answer_part = output_text.split("Answer:")[-1].strip().upper()
 
-    # 简化的模式匹配，只要包含相关关键词即可
-    if "SUPPORT" in answer_part and "NOT SUPPORT" not in answer_part:
+    # 更严格的模式匹配
+    if "SUPPORTED" in answer_part and "NOT SUPPORTED" not in answer_part:
         return "SUPPORTED"
-    elif "REFUTE" in answer_part or "NOT SUPPORT" in answer_part:
+    elif "REFUTED" in answer_part:
         return "REFUTED"
-    # 基本上所有生成的文本都应该包含上述关键词之一
     else:
-        # 后备策略：偏向确定结果而非未知
-        print(f"Unrecognized answer, using fallback strategy: '{answer_part}'")
-        if any(word in answer_part for word in ["YES", "TRUE", "CORRECT"]):
+        # 尝试更灵活的匹配
+        if any(word in answer_part for word in ["SUPPORT", "YES", "TRUE", "CORRECT"]):
             return "SUPPORTED"
-        elif any(word in answer_part for word in ["NO", "FALSE", "INCORRECT", "NOT"]):
+        elif any(
+            word in answer_part for word in ["REFUTE", "NO", "FALSE", "INCORRECT"]
+        ):
             return "REFUTED"
-        # 实在无法判断的情况
         else:
+            # 输出未识别的答案以便调试
+            print(f"Unrecognized answer: '{answer_part}'")
             return "UNKNOWN"
 
 
@@ -341,67 +336,62 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
 
 def main():
     # 命令行参数
-    parser = argparse.ArgumentParser(description="分类FEVER数据集中的对抗样本")
-    parser.add_argument(
-        "--model", default="meta-llama/Llama-3.2-1B-Instruct", help="模型名称或路径"
+    parser = argparse.ArgumentParser(
+        description="Classify FEVER dataset with Llama model"
     )
-    parser.add_argument("--token", help="Hugging Face访问令牌")
+    parser.add_argument(
+        "--model", default="meta-llama/Llama-3.2-1B-Instruct", help="Model name or path"
+    )
+    parser.add_argument("--token", help="Hugging Face token")
     parser.add_argument(
         "--data_path",
         default="./data/adversarial_dataset_corrected.csv",
-        help="数据集路径",
+        help="Path to dataset",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=8, help="批处理大小 (默认: 8)"
+        "--batch_size",
+        type=int,
+        default=1,
+        help="Batch size (使用1表示单样本处理，大于1启用批处理)",
     )
-    parser.add_argument("--output_dir", default="./results", help="结果输出目录")
     parser.add_argument(
-        "--nrows", type=int, default=50, help="加载的行数 (默认: 50，设为0加载全部)"
+        "--output_dir", default="./results", help="Directory to save results"
     )
     parser.add_argument(
-        "--save_predictions", action="store_true", help="保存每个样本的预测结果"
+        "--full_dataset", action="store_true", help="处理完整数据集而不是前50行"
     )
-    parser.add_argument("--verbose", action="store_true", help="输出详细日志")
     args = parser.parse_args()
 
     # 确保输出目录存在
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # 设置日志级别
-    if args.verbose:
-        print("启用详细日志模式")
-
     # 加载数据
-    df = load_data(args.data_path, args.nrows if args.nrows > 0 else None)
+    if args.full_dataset:
+        df = pd.read_csv(args.data_path)
+        print("Processing full dataset")
+    else:
+        df = load_data(args.data_path)
+        print("Processing first 50 samples only (use --full_dataset to process all)")
 
     # 构建提示
-    start_time = time.time()
     original_prompts, adversarial_prompts, skipped_samples, valid_samples = (
         construct_prompts(df)
     )
-    prep_time = time.time() - start_time
-    print(f"提示构建完成，耗时 {prep_time:.2f} 秒")
 
     # 加载模型
     tokenizer, model = load_model(args.model, args.token)
 
     # 对原始样本进行分类
-    print("\n分类原始样本...")
-    orig_start = time.time()
+    print("\nClassifying original samples...")
     original_predictions = classify_samples(
         tokenizer, model, original_prompts, args.batch_size
     )
-    orig_time = time.time() - orig_start
-    print(f"原始样本分类完成，耗时 {orig_time:.2f} 秒")
 
     # 对对抗性样本进行分类
-    print("\n分类对抗性样本...")
-    adv_start = time.time()
+    print("\nClassifying adversarial samples...")
     adversarial_predictions = classify_samples(
         tokenizer, model, adversarial_prompts, args.batch_size
     )
-    adv_time = time.time() - adv_start
-    print(f"对抗样本分类完成，耗时 {adv_time:.2f} 秒")
 
     # 移除被跳过的样本
     valid_df = df.drop(index=skipped_samples).reset_index(drop=True)
@@ -411,45 +401,14 @@ def main():
         valid_df, original_predictions, adversarial_predictions, valid_samples
     )
 
-    # 输出性能统计
-    total_time = time.time() - start_time
-    samples_per_sec = valid_samples / (orig_time + adv_time)
-    print(f"\n性能统计:")
-    print(f"  总处理时间: {total_time:.2f} 秒")
-    print(f"  样本处理速度: {samples_per_sec:.2f} 样本/秒")
-
     # 保存结果
     model_name_short = args.model.split("/")[-1]
-    batch_info = f"_batch{args.batch_size}"
-    sample_info = f"_n{args.nrows}" if args.nrows > 0 else "_full"
+    batch_info = f"_batch{args.batch_size}" if args.batch_size > 1 else ""
     result_path = os.path.join(
-        args.output_dir, f"{model_name_short}{batch_info}{sample_info}_results.csv"
+        args.output_dir, f"{model_name_short}{batch_info}_results.csv"
     )
     result_df.to_csv(result_path, index=False)
-    print(f"结果已保存到 {result_path}")
-
-    # 可选：保存每个样本的预测结果
-    if args.save_predictions:
-        pred_path = os.path.join(
-            args.output_dir,
-            f"{model_name_short}{batch_info}{sample_info}_predictions.csv",
-        )
-        pred_df = pd.DataFrame(
-            {
-                "original_prompt": original_prompts,
-                "adversarial_prompt": adversarial_prompts,
-                "original_prediction": original_predictions,
-                "adversarial_prediction": adversarial_predictions,
-                "flipped": [
-                    o != a
-                    for o, a in zip(original_predictions, adversarial_predictions)
-                ],
-            }
-        )
-        pred_df.to_csv(pred_path, index=False)
-        print(f"预测详情已保存到 {pred_path}")
-
-    return result_df
+    print(f"Results saved to {result_path}")
 
 
 if __name__ == "__main__":
