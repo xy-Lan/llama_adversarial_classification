@@ -136,30 +136,93 @@ def load_model(model_name, token=None):
     return tokenizer, model
 
 
-def classify_samples(tokenizer, model, prompts):
+def classify_samples(tokenizer, model, prompts, batch_size=8):
     predictions = []
     device = next(model.parameters()).device
 
-    # 完全保持与CPU版本相同的处理方式，一个一个样本处理
-    for i, prompt in enumerate(prompts):
-        print(
-            f"Processing prompt {i + 1}/{len(prompts)}: {prompt}"
-        )  # 与CPU版本完全相同的输出
+    # 检测是否使用批处理
+    use_batch = batch_size > 1
 
-        # 编码输入 - 使用与CPU版本相同的encode方法
-        input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+    if use_batch:
+        print(f"Using batch processing with batch size: {batch_size}")
+    else:
+        print("Using single sample processing")
 
-        # 与CPU版本保持相同的生成参数
-        with torch.no_grad():
-            output_ids = model.generate(
-                input_ids=input_ids, max_length=input_ids.shape[1] + 10, do_sample=False
+    # 如果使用批处理
+    if use_batch:
+        for i in range(0, len(prompts), batch_size):
+            batch = prompts[i : i + batch_size]
+            batch_size_actual = len(batch)  # 实际批次大小
+            print(
+                f"Processing batch {i//batch_size + 1}/{(len(prompts)-1)//batch_size + 1}"
             )
 
-        # 解码输出 - 使用与CPU版本相同的decode方法
-        output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-        prediction = parse_answer(output_text)
-        predictions.append(prediction)
-        print(f"Prediction for prompt {i + 1}: {prediction}")  # 与CPU版本相同的输出格式
+            try:
+                # 真正的批处理 - 一起编码和处理所有样本
+                inputs = tokenizer(batch, padding=True, return_tensors="pt").to(device)
+
+                with torch.no_grad():
+                    # 注意这里需要使用类似的生成参数
+                    outputs = model.generate(
+                        **inputs,
+                        max_length=inputs.input_ids.shape[1] + 10,  # 与单样本版本一致
+                        do_sample=False,
+                        pad_token_id=tokenizer.eos_token_id,
+                    )
+
+                # 对每个样本处理结果
+                for j in range(batch_size_actual):
+                    # 打印和单样本版本相同的信息
+                    print(f"Processing prompt {i+j+1}/{len(prompts)}: {batch[j]}")
+
+                    # 解码完整输出
+                    output_text = tokenizer.decode(outputs[j], skip_special_tokens=True)
+                    prediction = parse_answer(output_text)
+                    predictions.append(prediction)
+                    print(f"Prediction for prompt {i+j+1}: {prediction}")
+
+            except Exception as e:
+                print(f"Batch processing error: {e}")
+                print("Falling back to single sample processing for this batch")
+
+                # 单样本回退处理
+                for j, prompt in enumerate(batch):
+                    print(f"Processing prompt {i+j+1}/{len(prompts)}: {prompt}")
+
+                    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+
+                    with torch.no_grad():
+                        output_ids = model.generate(
+                            input_ids=input_ids,
+                            max_length=input_ids.shape[1] + 10,
+                            do_sample=False,
+                        )
+
+                    output_text = tokenizer.decode(
+                        output_ids[0], skip_special_tokens=True
+                    )
+                    prediction = parse_answer(output_text)
+                    predictions.append(prediction)
+                    print(f"Prediction for prompt {i+j+1}: {prediction}")
+
+    # 如果不使用批处理，使用原始单样本方式
+    else:
+        for i, prompt in enumerate(prompts):
+            print(f"Processing prompt {i + 1}/{len(prompts)}: {prompt}")
+
+            input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+
+            with torch.no_grad():
+                output_ids = model.generate(
+                    input_ids=input_ids,
+                    max_length=input_ids.shape[1] + 10,
+                    do_sample=False,
+                )
+
+            output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+            prediction = parse_answer(output_text)
+            predictions.append(prediction)
+            print(f"Prediction for prompt {i + 1}: {prediction}")
 
     return predictions
 
@@ -238,7 +301,16 @@ def main():
         help="Path to dataset",
     )
     parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=1,
+        help="Batch size (使用1表示单样本处理，大于1启用批处理)",
+    )
+    parser.add_argument(
         "--output_dir", default="./results", help="Directory to save results"
+    )
+    parser.add_argument(
+        "--full_dataset", action="store_true", help="处理完整数据集而不是前50行"
     )
     args = parser.parse_args()
 
@@ -246,7 +318,12 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # 加载数据
-    df = load_data(args.data_path)
+    if args.full_dataset:
+        df = pd.read_csv(args.data_path)
+        print("Processing full dataset")
+    else:
+        df = load_data(args.data_path)
+        print("Processing first 50 samples only (use --full_dataset to process all)")
 
     # 构建提示
     original_prompts, adversarial_prompts, skipped_samples, valid_samples = (
@@ -258,11 +335,15 @@ def main():
 
     # 对原始样本进行分类
     print("\nClassifying original samples...")
-    original_predictions = classify_samples(tokenizer, model, original_prompts)
+    original_predictions = classify_samples(
+        tokenizer, model, original_prompts, args.batch_size
+    )
 
     # 对对抗性样本进行分类
     print("\nClassifying adversarial samples...")
-    adversarial_predictions = classify_samples(tokenizer, model, adversarial_prompts)
+    adversarial_predictions = classify_samples(
+        tokenizer, model, adversarial_prompts, args.batch_size
+    )
 
     # 移除被跳过的样本
     valid_df = df.drop(index=skipped_samples).reset_index(drop=True)
@@ -273,8 +354,10 @@ def main():
     )
 
     # 保存结果
+    model_name_short = args.model.split("/")[-1]
+    batch_info = f"_batch{args.batch_size}" if args.batch_size > 1 else ""
     result_path = os.path.join(
-        args.output_dir, f"{args.model.split('/')[-1]}_results.csv"
+        args.output_dir, f"{model_name_short}{batch_info}_results.csv"
     )
     result_df.to_csv(result_path, index=False)
     print(f"Results saved to {result_path}")
