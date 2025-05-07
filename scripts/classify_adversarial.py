@@ -2,20 +2,13 @@
 
 import pandas as pd
 import torch
-from transformers import LlamaTokenizer, LlamaForCausalLM
-from accelerate import init_empty_weights, infer_auto_device_map
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+import os
+import argparse
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-
-# def load_data(file_path):
-#     df = pd.read_csv(file_path)
-#     return df.head(100)
 
 def load_data(file_path):
-    # 加载第401行到最后一行
-    # df = pd.read_csv(file_path, skiprows=list(range(1, 51)))
-    df = pd.read_csv(file_path, nrows=50)
-    # df = pd.read_csv(file_path)
+    df = pd.read_csv(file_path)
     return df
 
 
@@ -25,8 +18,8 @@ def construct_prompts(df):
     skipped_samples = []  # 记录被剔除的样本索引
 
     for index, row in df.iterrows():
-        original_sample = row['original_samples']
-        adversarial_sample = row['adversarial_samples']
+        original_sample = row["original_samples"]
+        adversarial_sample = row["adversarial_samples"]
 
         # 检查原始样本是否为字符串
         if not isinstance(original_sample, str):
@@ -46,21 +39,35 @@ def construct_prompts(df):
 
         # 检查分隔符是否存在（针对原始和对抗性样本）
         if "~" not in original_sample or "~" not in adversarial_sample:
-            print(f"Skipping sample at index {index}: Missing '~' separator in one or both samples.")
+            print(
+                f"Skipping sample at index {index}: Missing '~' separator in one or both samples."
+            )
             skipped_samples.append(index)
             continue
 
         # 检查原始样本分割结果是否有效
         original_parts = original_sample.split("~", 1)
-        if len(original_parts) != 2 or not original_parts[0].strip() or not original_parts[1].strip():
-            print(f"Skipping sample at index {index}: Improperly formatted original sample.")
+        if (
+            len(original_parts) != 2
+            or not original_parts[0].strip()
+            or not original_parts[1].strip()
+        ):
+            print(
+                f"Skipping sample at index {index}: Improperly formatted original sample."
+            )
             skipped_samples.append(index)
             continue
 
         # 检查对抗性样本分割结果是否有效
         adversarial_parts = adversarial_sample.split("~", 1)
-        if len(adversarial_parts) != 2 or not adversarial_parts[0].strip() or not adversarial_parts[1].strip():
-            print(f"Skipping sample at index {index}: Improperly formatted adversarial sample.")
+        if (
+            len(adversarial_parts) != 2
+            or not adversarial_parts[0].strip()
+            or not adversarial_parts[1].strip()
+        ):
+            print(
+                f"Skipping sample at index {index}: Improperly formatted adversarial sample."
+            )
             skipped_samples.append(index)
             continue
 
@@ -71,13 +78,15 @@ def construct_prompts(df):
         original_prompt = (
             f"Evidence: {evidence_original.strip()}\n"
             f"Claim: {claim_original.strip()}\n"
-            "Question: Is this claim supported or refuted based on the evidence?\n"
+            "Question: Is this claim supported or refuted based on the evidence? "
+            'Answer ONLY "SUPPORTED" or "REFUTED" (no other words)\n'
             "Answer:"
         )
         adversarial_prompt = (
             f"Evidence: {evidence_adversarial.strip()}\n"
             f"Claim: {claim_adversarial.strip()}\n"
-            "Question: Is this claim supported or refuted based on the evidence?\n"
+            "Question: Is this claim supported or refuted based on the evidence? "
+            'Answer ONLY "SUPPORTED" or "REFUTED" (no other words)\n'
             "Answer:"
         )
 
@@ -95,94 +104,171 @@ def construct_prompts(df):
     return original_prompts, adversarial_prompts, skipped_samples, valid_samples
 
 
-def load_model(model_name="meta-llama/Llama-3.2-1B-Instruct", token="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"):
-    # tokenizer = LlamaTokenizer.from_pretrained(model_dir)
-    # model = LlamaForCausalLM.from_pretrained(model_dir)
-    # model.eval()
+def load_model(model_name, token=None):
     print("Loading model...")
-    # 配置 INT8 量化
-    # quant_config = BitsAndBytesConfig(
-    #     load_in_8bit=True,  # 启用 INT8 量化
-    #     llm_int8_enable_fp32_cpu_offload=True,  # 在 CPU 上保留 FP32 精度
-    # )
 
-    # 加载分布式模型（空权重加载）
-    # with init_empty_weights():
-    #     model = AutoModelForCausalLM.from_pretrained(
-    #         model_name,
-    #         # quantization_config=quant_config,
-    #         use_auth_token=token
-    #         # device_map="auto"  # 自动分配到可用 GPU 和 CPU
-    #     )
+    # 检查是否有GPU可用
+    if torch.cuda.is_available():
+        gpu = torch.cuda.get_device_properties(0)
+        print(f"GPU: {gpu.name}  {gpu.total_memory/1e9:.1f} GB")
+        if "H100" in gpu.name:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+    else:
+        print("GPU not available, using CPU for inference.")
 
+    # 设置模型加载参数
+    model_kwargs = {
+        "use_auth_token": token,
+        "device_map": "auto",  # 自动将模型映射到可用设备
+        "torch_dtype": torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        "low_cpu_mem_usage": True,
+        "cache_dir": os.environ.get("HF_HOME", None),
+    }
+
+    # 加载tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token)
-    model = AutoModelForCausalLM.from_pretrained(model_name, use_auth_token=token)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+
+    # 加载模型
+    try:
+        model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        print("Trying with extended timeout...")
+        model_kwargs["local_files_only"] = False
+        model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+
     model.eval()
     print("Model loaded successfully!")
+
+    # 打印模型所在设备
+    device = next(model.parameters()).device
+    print(f"Model is on device: {device}")
+
     return tokenizer, model
 
 
-def classify_samples(tokenizer, model, prompts):
+def classify_samples(tokenizer, model, prompts, batch_size=8):
     predictions = []
-    for i, prompt in enumerate(prompts):
-        print(f"Processing prompt {i + 1}/{len(prompts)}: {prompt}")  # 增加更多的输出语句，显示当前处理进度
-        input_ids = tokenizer.encode(prompt, return_tensors='pt')
-        with torch.no_grad():
-            output_ids = model.generate(
-                input_ids=input_ids,
-                max_length=input_ids.shape[1] + 10,
-                do_sample=False
-            )
-        output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-        prediction = parse_answer(output_text)
-        predictions.append(prediction)
-        print(f"Prediction for prompt {i + 1}: {prediction}")  # 增加输出预测结果
+    device = next(model.parameters()).device
+
+    # 如果有GPU，调整批处理大小
+    if torch.cuda.is_available():
+        mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+        batch_size = min(batch_size, int(mem) // 2 or 1)
+        print(f"Using batch size: {batch_size}")
+
+    # 批量处理
+    for i in range(0, len(prompts), batch_size):
+        batch = prompts[i : i + batch_size]
+        print(
+            f"Processing batch {i//batch_size + 1}/{(len(prompts)-1)//batch_size + 1}"
+        )
+
+        try:
+            # 使用padding处理批次
+            inputs = tokenizer(batch, padding=True, return_tensors="pt").to(device)
+
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=5,  # 只需要生成几个token就够了
+                    do_sample=False,
+                    temperature=0.0,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+
+            # 解码每个输出
+            for j, output in enumerate(outputs):
+                # 只解码生成的部分
+                input_length = inputs.input_ids[j].size(0)
+                generated_tokens = output[input_length:]
+                generated_text = tokenizer.decode(
+                    generated_tokens, skip_special_tokens=True
+                )
+                full_text = batch[j] + generated_text
+
+                prediction = parse_answer(full_text)
+                predictions.append(prediction)
+
+                # 打印前几个样本的详细信息
+                if i == 0 and j < 3:
+                    print(f"  Sample {j+1}:")
+                    print(f"    Prompt: {batch[j]}")
+                    print(f"    Generated: {generated_text}")
+                    print(f"    Prediction: {prediction}")
+
+        except Exception as e:
+            print(f"Error in batch processing: {e}")
+            # 单样本回退处理
+            for prompt in batch:
+                try:
+                    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+                    with torch.no_grad():
+                        output = model.generate(
+                            **inputs, max_new_tokens=5, do_sample=False
+                        )
+                    generated_text = tokenizer.decode(
+                        output[0, inputs.input_ids.shape[1] :], skip_special_tokens=True
+                    )
+                    full_text = prompt + generated_text
+                    prediction = parse_answer(full_text)
+                    predictions.append(prediction)
+                except Exception as inner_e:
+                    print(f"Error in single sample processing: {inner_e}")
+                    predictions.append("UNKNOWN")
+
+    # 统计预测结果分布
+    supported_count = predictions.count("SUPPORTED")
+    refuted_count = predictions.count("REFUTED")
+    unknown_count = predictions.count("UNKNOWN")
+
+    print(f"Prediction distribution:")
+    print(
+        f"  SUPPORTED: {supported_count} ({supported_count/len(predictions)*100:.1f}%)"
+    )
+    print(f"  REFUTED: {refuted_count} ({refuted_count/len(predictions)*100:.1f}%)")
+    if unknown_count > 0:
+        print(f"  UNKNOWN: {unknown_count} ({unknown_count/len(predictions)*100:.1f}%)")
+
     return predictions
 
 
 def parse_answer(output_text):
     # 提取模型生成的答案部分
-    answer = output_text.split('Answer:')[-1].strip().upper()
-    if 'SUPPORTED' in answer:
-        return 'SUPPORTED'
-    elif 'REFUTED' in answer:
-        return 'REFUTED'
-    # elif 'NOT ENOUGH INFO' in answer:
-    #     return 'NOT ENOUGH INFO'
+    answer = output_text.split("Answer:")[-1].strip().upper()
+    if "SUPPORTED" in answer:
+        return "SUPPORTED"
+    elif "REFUTED" in answer:
+        return "REFUTED"
     else:
-        print("Answer is ", answer)
-        return 'UNKNOWN'
+        return "UNKNOWN"
 
 
 def compare_results(df, original_predictions, adversarial_predictions, valid_samples):
     # 添加预测结果列
-    df['original_prediction'] = original_predictions
-    df['adversarial_prediction'] = adversarial_predictions
+    df["original_prediction"] = original_predictions
+    df["adversarial_prediction"] = adversarial_predictions
 
     # 检测分类结果是否翻转
-    df['prediction_flipped'] = df['original_prediction'] != df['adversarial_prediction']
+    df["prediction_flipped"] = df["original_prediction"] != df["adversarial_prediction"]
 
     # 计算 Flip Rate
     total_samples = len(df)  # 所有样本的数量
-    flipped_samples = df['prediction_flipped'].sum()  # 分类结果翻转的样本数量
+    flipped_samples = df["prediction_flipped"].sum()  # 分类结果翻转的样本数量
     flip_rate = flipped_samples / valid_samples if valid_samples > 0 else 0
 
     # 计算 Similarity-Weighted Flip Rate
-    df_preserve = df[df['agreed_labels'] == 0]  # 保留原义的样本
-    flipped_preserve_samples = df_preserve['prediction_flipped'].sum()  # 保留原义中翻转的样本数量
-    similarity_weighted_flip_rate = flipped_preserve_samples / valid_samples if valid_samples else 0
-
-    # # 导出成功翻转的样本到CSV文件
-    # flipped_samples_df = df[df['prediction_flipped'] == True]
-    # flipped_samples_df.to_csv('./data/Llama-3.2-1B-Instruct_flipped_samples.csv', index=False)
-    # print(
-    #     f"Successfully exported {len(flipped_samples_df)} flipped samples to './data/Llama-3.2-1B-Instruct_flipped_samples.csv'")
-    #
-    # # 导出保留原义且成功翻转的样本到CSV文件
-    # preserved_flipped_df = df[(df['agreed_labels'] == 0) & (df['prediction_flipped'] == True)]
-    # preserved_flipped_df.to_csv('./data/Llama-3.2-1B-Instruct_preserved_flipped_samples.csv', index=False)
-    # print(
-    #     f"Successfully exported {len(preserved_flipped_df)} preserved meaning flipped samples to './data/Llama-3.2-1B-Instruct_preserved_flipped_samples.csv'")
+    df_preserve = df[df["agreed_labels"] == 0]  # 保留原义的样本
+    flipped_preserve_samples = df_preserve[
+        "prediction_flipped"
+    ].sum()  # 保留原义中翻转的样本数量
+    similarity_weighted_flip_rate = (
+        flipped_preserve_samples / valid_samples if valid_samples else 0
+    )
 
     # 输出结果
     print(f"Total samples: {total_samples}")
@@ -192,37 +278,83 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
     print(f"Flipped samples in preserved meaning: {flipped_preserve_samples}")
     print(f"Similarity-Weighted Flip Rate: {similarity_weighted_flip_rate:.2%}")
 
+    # 显示一些翻转的例子
+    if flipped_samples > 0:
+        print("\nFlipped sample examples:")
+        flipped_indices = df[df["prediction_flipped"]].index[: min(3, flipped_samples)]
+        for idx in flipped_indices:
+            print(f"Sample {idx}:")
+            print(f"  Original: {df.loc[idx, 'original_samples']}")
+            print(f"  Adversarial: {df.loc[idx, 'adversarial_samples']}")
+            print(f"  Original Prediction: {df.loc[idx, 'original_prediction']}")
+            print(f"  Adversarial Prediction: {df.loc[idx, 'adversarial_prediction']}")
+            print()
+
     return df
 
 
 def main():
+    # 命令行参数
+    parser = argparse.ArgumentParser(
+        description="Classify FEVER dataset with Llama model"
+    )
+    parser.add_argument(
+        "--model", default="meta-llama/Llama-3.2-1B-Instruct", help="Model name or path"
+    )
+    parser.add_argument("--token", help="Hugging Face token")
+    parser.add_argument(
+        "--data_path",
+        default="./data/adversarial_dataset_corrected.csv",
+        help="Path to dataset",
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=8, help="Batch size for processing"
+    )
+    parser.add_argument(
+        "--output_dir", default="./results", help="Directory to save results"
+    )
+    args = parser.parse_args()
+
+    # 确保输出目录存在
+    os.makedirs(args.output_dir, exist_ok=True)
+
     # 加载数据
-    df = load_data('./data/adversarial_dataset.csv')
+    df = load_data(args.data_path)
 
     # 构建提示
-    original_prompts, adversarial_prompts, skipped_samples, valid_samples = construct_prompts(df)
-
-    token = "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"
+    original_prompts, adversarial_prompts, skipped_samples, valid_samples = (
+        construct_prompts(df)
+    )
 
     # 加载模型
-    tokenizer, model = load_model(token=token)
+    tokenizer, model = load_model(args.model, args.token)
 
     # 对原始样本进行分类
-    print("Classifying original samples...")
-    original_predictions = classify_samples(tokenizer, model, original_prompts)
+    print("\nClassifying original samples...")
+    original_predictions = classify_samples(
+        tokenizer, model, original_prompts, args.batch_size
+    )
 
     # 对对抗性样本进行分类
-    print("Classifying adversarial samples...")
-    adversarial_predictions = classify_samples(tokenizer, model, adversarial_prompts)
+    print("\nClassifying adversarial samples...")
+    adversarial_predictions = classify_samples(
+        tokenizer, model, adversarial_prompts, args.batch_size
+    )
 
+    # 移除被跳过的样本
     valid_df = df.drop(index=skipped_samples).reset_index(drop=True)
 
     # 比较结果
-    result_df = compare_results(valid_df, original_predictions, adversarial_predictions, valid_samples)
+    result_df = compare_results(
+        valid_df, original_predictions, adversarial_predictions, valid_samples
+    )
 
     # 保存结果
-    # result_df.to_csv('/content/llama_adversarial_classification/scripts/classification_results.csv', index=False)
-    # print("Results saved to './data/classification_results.csv'")
+    result_path = os.path.join(
+        args.output_dir, f"{args.model.split('/')[-1]}_results.csv"
+    )
+    result_df.to_csv(result_path, index=False)
+    print(f"Results saved to {result_path}")
 
 
 if __name__ == "__main__":
