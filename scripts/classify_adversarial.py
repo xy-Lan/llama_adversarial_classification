@@ -401,48 +401,120 @@ def parse_answer(output_text):
 
 
 def compare_results(df, original_predictions, adversarial_predictions, valid_samples):
-    # 添加预测结果列
+    # Add prediction result columns
     df["original_prediction"] = original_predictions
     df["adversarial_prediction"] = adversarial_predictions
 
-    # 检测分类结果是否翻转
+    # --- New: Handle 'correctness' column and calculate Clean Accuracy ---
+    if "correctness" not in df.columns:
+        print(
+            "\nWarning: 'correctness' column not found. Skipping Clean Accuracy and related metrics."
+        )
+        clean_accuracy = 0
+        df["original_is_correct"] = False  # Placeholder
+        num_correct_original_samples_valid_gt = 0
+    else:
+        # Map 'correctness' values (e.g., "SUPPORTS" -> "SUPPORTED")
+        df["mapped_correctness"] = (
+            df["correctness"]
+            .str.upper()
+            .replace(
+                {
+                    "SUPPORTS": "SUPPORTED",
+                    "REFUTES": "REFUTED",
+                    # Add other potential mappings here if needed
+                }
+            )
+        )
+        # Consider only valid mapped labels for accuracy calculations
+        valid_ground_truth_labels = ["SUPPORTED", "REFUTED"]
+        df["is_valid_ground_truth"] = df["mapped_correctness"].isin(
+            valid_ground_truth_labels
+        )
+
+        num_samples_with_valid_gt = df["is_valid_ground_truth"].sum()
+
+        df["original_is_correct"] = (
+            df["original_prediction"] == df["mapped_correctness"]
+        ) & df["is_valid_ground_truth"]
+        num_correct_original_samples_valid_gt = df["original_is_correct"].sum()
+
+        if num_samples_with_valid_gt > 0:
+            clean_accuracy = (
+                num_correct_original_samples_valid_gt / num_samples_with_valid_gt
+            )
+        else:
+            clean_accuracy = 0
+        print(
+            f"\nClean Accuracy (on original samples with valid ground truth): {clean_accuracy:.2%} ({num_correct_original_samples_valid_gt}/{num_samples_with_valid_gt})"
+        )
+
+    # Detect if classification result flipped
     df["prediction_flipped"] = df["original_prediction"] != df["adversarial_prediction"]
 
-    # 计算 Flip Rate
-    total_samples = len(df)  # 所有样本的数量
-    flipped_samples = df["prediction_flipped"].sum()  # 分类结果翻转的样本数量
-    flip_rate = flipped_samples / valid_samples if valid_samples > 0 else 0
-
-    # 计算 Similarity-Weighted Flip Rate
-    df_preserve = df[df["agreed_labels"] == 0]  # 保留原义的样本
-    flipped_preserve_samples = df_preserve[
-        "prediction_flipped"
-    ].sum()  # 保留原义中翻转的样本数量
-    similarity_weighted_flip_rate = (
-        flipped_preserve_samples / valid_samples if valid_samples else 0
+    # Calculate standard Flip Rate (based on all valid_samples)
+    # valid_samples is the count of samples for which prompts were successfully built
+    flipped_samples_count = df["prediction_flipped"].sum()
+    overall_flip_rate = (
+        flipped_samples_count / valid_samples if valid_samples > 0 else 0
     )
 
-    # 输出结果
-    print(f"Total samples: {total_samples}")
-    print(f"Total flipped samples: {flipped_samples}")
-    print(f"Flip Rate: {flip_rate:.2%}")
-    print(f"Total preserved meaning samples (agreed_labels == 0): {len(df_preserve)}")
-    print(f"Flipped samples in preserved meaning: {flipped_preserve_samples}")
-    print(f"Similarity-Weighted Flip Rate: {similarity_weighted_flip_rate:.2%}")
+    # --- Calculate metrics for meaning-preserving samples ---
+    meaning_preserving_df = df[df["agreed_labels"] == 0].copy()
+    num_meaning_preserving = len(meaning_preserving_df)
+    flips_in_meaning_preserving = meaning_preserving_df["prediction_flipped"].sum()
 
-    # 显示翻转的例子
-    if flipped_samples > 0:
-        print("\nFlipped sample examples:")
-        flipped_indices = df.index[df["prediction_flipped"]].tolist()[
-            : min(3, flipped_samples)
+    # Original "Similarity-Weighted Flip Rate" (flips in meaning_preserving / total valid_samples)
+    # Renaming for clarity based on its calculation
+    flip_rate_mp_vs_all = (
+        flips_in_meaning_preserving / valid_samples if valid_samples > 0 else 0
+    )
+
+    # --- New: Calculate metrics for (Meaning-Preserving AND Originally Correctly Classified) samples ---
+    if "correctness" in df.columns:
+        # Filter for meaning-preserving samples that were also originally correct and had valid ground truth
+        correct_and_meaning_preserving_df = meaning_preserving_df[
+            meaning_preserving_df["original_is_correct"]
         ]
-        for idx in flipped_indices:
-            print(f"Sample {idx}:")
-            print(f"  Original: {df.loc[idx, 'original_samples']}")
-            print(f"  Adversarial: {df.loc[idx, 'adversarial_samples']}")
-            print(f"  Original Prediction: {df.loc[idx, 'original_prediction']}")
-            print(f"  Adversarial Prediction: {df.loc[idx, 'adversarial_prediction']}")
-            print()
+        num_correct_and_mp = len(correct_and_meaning_preserving_df)
+
+        flips_in_correct_and_mp = correct_and_meaning_preserving_df[
+            "prediction_flipped"
+        ].sum()
+
+        robust_flip_rate = (
+            flips_in_correct_and_mp / num_correct_and_mp
+            if num_correct_and_mp > 0
+            else 0
+        )
+
+        print(
+            f"Meaning-Preserving & Correctly Classified Original Samples: {num_correct_and_mp}"
+        )
+        print(
+            f"Flip Rate (for Meaning-Preserving & Correctly Classified Originals): {robust_flip_rate:.2%} ({flips_in_correct_and_mp}/{num_correct_and_mp})"
+        )
+    else:
+        print(
+            "Robust Flip Rate metrics: Not calculated ('correctness' column missing)."
+        )
+
+    # --- Output Summary ---
+    print(f"\nOverall Metrics (based on {valid_samples} valid samples):")
+    print(f"  Total Flipped Samples: {flipped_samples_count}")
+    print(f"  Overall Flip Rate: {overall_flip_rate:.2%}")
+
+    print(f"\nMeaning-Preserving Metrics (Total: {num_meaning_preserving} samples):")
+    print(f"  Flipped Samples within Meaning-Preserving: {flips_in_meaning_preserving}")
+    print(
+        f"  Flip Rate (Meaning-Preserving Flips / All Valid Samples): {flip_rate_mp_vs_all:.2%}"
+    )
+    # Optional: Flip rate *within* meaning-preserving samples
+    # flip_rate_within_mp = flips_in_meaning_preserving / num_meaning_preserving if num_meaning_preserving > 0 else 0
+    # print(f"  Flip Rate (within Meaning-Preserving subset): {flip_rate_within_mp:.2%}")
+
+    # Ensure 'Flipped sample examples' section is removed as requested
+    # The original code for printing examples is now omitted.
 
     return df
 
