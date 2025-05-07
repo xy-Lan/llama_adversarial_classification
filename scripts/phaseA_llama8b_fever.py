@@ -8,6 +8,7 @@ from huggingface_hub import login as hf_login
 from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments
 from peft import LoraConfig, get_peft_model
 from trl import SFTTrainer
+import torch, warnings
 
 
 # ------------------------- Wiki 缓存 -------------------------
@@ -107,6 +108,48 @@ def prepare_dataset(
     ds = raw.map(convert, remove_columns=raw.column_names)
     return ds.filter(lambda x: x is not None)
 
+def load_safe_tokenizer_and_model(model_id, fp16=True):
+    """
+    1. 始终使用 fast tokenizer
+    2. 若需补 token → 同步扩容模型
+    3. 最终确保 tokenizer.vocab_size == model.get_input_embeddings().num_embeddings
+    """
+    # 1) fast tokenizer
+    tok = AutoTokenizer.from_pretrained(
+        model_id,
+        add_eos_token=False,     # 因为我们训练文本里已手动加 <|eot_id|>
+        use_fast=True            # <── 关键！
+    )
+    tok.padding_side = "left"
+
+    if tok.pad_token is None:     # Llama 通常如此
+        tok.pad_token = tok.eos_token
+        tok.pad_token_id = tok.eos_token_id   # 不会新增词表
+
+    # 2) 加载模型
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        device_map="auto",
+        torch_dtype=torch.float16 if fp16 else "auto",
+    )
+
+    # 3) 断言特殊 token 都在词表内
+    specials = ["<|start_header_id|>", "<|end_header_id|>",
+                "<|eot_id|>", "<|begin_of_text|>"]
+    missing = [s for s in specials if tok.convert_tokens_to_ids(s) == tok.unk_token_id]
+    if missing:
+        warnings.warn(f"Tokenizer missing {missing}; adding and resizing embeddings.")
+        tok.add_special_tokens({"additional_special_tokens": missing})
+        model.resize_token_embeddings(len(tok))
+
+    # 4) 最终确认两者尺寸一致
+    assert len(tok) == model.get_input_embeddings().num_embeddings, (
+        f"tokenizer ({len(tok)}) vs model embeddings "
+        f"({model.get_input_embeddings().num_embeddings}) size mismatch!"
+    )
+
+    return tok, model
+
 
 # ------------------------- Trainer --------------------------
 def build_trainer(cfg) -> SFTTrainer:
@@ -116,39 +159,44 @@ def build_trainer(cfg) -> SFTTrainer:
     # Load tokenizer
     # For SFTTrainer with dataset_text_field, add_eos_token=False is usually correct
     # if the text field already contains the EOS token.
-    tok = AutoTokenizer.from_pretrained(
-        cfg.model_id, add_eos_token=False, use_fast=True
-    )
+    # tok = AutoTokenizer.from_pretrained(
+    #     cfg.model_id, add_eos_token=False, use_fast=True
+    # )
+    #
+    # if tok.pad_token is None:
+    #     print("Tokenizer does not have a pad_token. Setting pad_token to eos_token.")
+    #     tok.pad_token = tok.eos_token  # Common practice for Llama models
+    #     tok.pad_token_id = tok.eos_token_id  # Ensure ID is also set
+    #
+    # tok.padding_side = "left"  # MODIFIED: Crucial for batched Causal LM
+    #
+    # # ── 2. **在这里插入断言** 立即验证特殊标记 ────────────────────
+    # specials = [
+    #     "<|start_header_id|>", "<|end_header_id|>",
+    #     "<|eot_id|>", "<|begin_of_text|>"
+    # ]
+    # for s in specials:
+    #     assert tok.convert_tokens_to_ids(s) != tok.unk_token_id, (
+    #         f"{s} 未被 tokenizer 识别！\n"
+    #         "请确认使用 fast tokenizer，或手动 add_special_tokens 后 "
+    #         "model.resize_token_embeddings(len(tok))"
+    #     )
+    #
+    # print(f"\n--- Trainer Tokenizer Details ---")
+    # print(f"EOS token used by tokenizer: '{tok.eos_token}' (ID: {tok.eos_token_id})")
+    # print(
+    #     f"PAD token used by tokenizer: '{tok.pad_token}' (ID: {tok.pad_token_id}), Padding Side: {tok.padding_side}"
+    # )
+    # print(f"---------------------------------\n")
+    #
+    # # Load base model
+    # base = AutoModelForCausalLM.from_pretrained(
+    #     cfg.model_id, device_map="auto", torch_dtype="auto"
+    # )
 
-    if tok.pad_token is None:
-        print("Tokenizer does not have a pad_token. Setting pad_token to eos_token.")
-        tok.pad_token = tok.eos_token  # Common practice for Llama models
-        tok.pad_token_id = tok.eos_token_id  # Ensure ID is also set
-
-    tok.padding_side = "left"  # MODIFIED: Crucial for batched Causal LM
-
-    # ── 2. **在这里插入断言** 立即验证特殊标记 ────────────────────
-    specials = [
-        "<|start_header_id|>", "<|end_header_id|>",
-        "<|eot_id|>", "<|begin_of_text|>"
-    ]
-    for s in specials:
-        assert tok.convert_tokens_to_ids(s) != tok.unk_token_id, (
-            f"{s} 未被 tokenizer 识别！\n"
-            "请确认使用 fast tokenizer，或手动 add_special_tokens 后 "
-            "model.resize_token_embeddings(len(tok))"
-        )
-
-    print(f"\n--- Trainer Tokenizer Details ---")
-    print(f"EOS token used by tokenizer: '{tok.eos_token}' (ID: {tok.eos_token_id})")
-    print(
-        f"PAD token used by tokenizer: '{tok.pad_token}' (ID: {tok.pad_token_id}), Padding Side: {tok.padding_side}"
-    )
-    print(f"---------------------------------\n")
-
-    # Load base model
-    base = AutoModelForCausalLM.from_pretrained(
-        cfg.model_id, device_map="auto", torch_dtype="auto"
+    tok, base = load_safe_tokenizer_and_model(
+        cfg.model_id,
+        fp16 = cfg.fp16 or cfg.bf16
     )
 
     # Apply LoRA
