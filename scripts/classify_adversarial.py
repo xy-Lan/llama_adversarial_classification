@@ -274,22 +274,21 @@ def parse_answer(output_text):
     # 提取模型生成的答案部分
     answer_part = output_text.split("Answer:")[-1].strip().upper()
 
-    # 更严格的模式匹配
-    if "SUPPORTED" in answer_part and "NOT SUPPORTED" not in answer_part:
+    # 简化的模式匹配，只要包含相关关键词即可
+    if "SUPPORT" in answer_part and "NOT SUPPORT" not in answer_part:
         return "SUPPORTED"
-    elif "REFUTED" in answer_part:
+    elif "REFUTE" in answer_part or "NOT SUPPORT" in answer_part:
         return "REFUTED"
+    # 基本上所有生成的文本都应该包含上述关键词之一
     else:
-        # 尝试更灵活的匹配
-        if any(word in answer_part for word in ["SUPPORT", "YES", "TRUE", "CORRECT"]):
+        # 后备策略：偏向确定结果而非未知
+        print(f"Unrecognized answer, using fallback strategy: '{answer_part}'")
+        if any(word in answer_part for word in ["YES", "TRUE", "CORRECT"]):
             return "SUPPORTED"
-        elif any(
-            word in answer_part for word in ["REFUTE", "NO", "FALSE", "INCORRECT"]
-        ):
+        elif any(word in answer_part for word in ["NO", "FALSE", "INCORRECT", "NOT"]):
             return "REFUTED"
+        # 实在无法判断的情况
         else:
-            # 输出未识别的答案以便调试
-            print(f"Unrecognized answer: '{answer_part}'")
             return "UNKNOWN"
 
 
