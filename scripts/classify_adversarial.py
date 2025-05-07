@@ -5,6 +5,7 @@ from peft import PeftModel
 from phaseA_llama1b_fever import WikiCache # Assuming this is in PYTHONPATH or same dir
 import argparse
 from tqdm import tqdm
+import re
 
 # --- CLI Argument Parsing ---
 parser = argparse.ArgumentParser(description="Validate a Phase A model (LoRA or base).")
@@ -148,7 +149,7 @@ def parse_answer(output_text):
         
     # 7. 处理特殊字符和特殊形式
     # Unicode字符和特殊符号的模式
-    if "\U00F3" in output_text:  # 特殊字符
+    if re.search(r'[^\x00-\x7F]', output_text):  # 检测任何非ASCII字符
         if "PORT" in text_without_spaces or "SUPP" in text_without_spaces:
             return "SUPPORTED"
         elif "REF" in text_without_spaces or "RUT" in text_without_spaces:
@@ -157,7 +158,7 @@ def parse_answer(output_text):
     # 检查是否有奇怪的Unicode字符组合，但以S开头
     if any(ord(c) > 127 for c in output_text) and output_text.strip().upper().startswith('S'):
         return "SUPPORTED"
-    
+
     # 检查是否有奇怪的Unicode字符组合，但以R开头
     if any(ord(c) > 127 for c in output_text) and output_text.strip().upper().startswith('R'):
         return "REFUTED"
