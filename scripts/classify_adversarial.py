@@ -5,6 +5,8 @@ import torch
 import os
 import argparse
 from transformers import AutoTokenizer, AutoModelForCausalLM
+import time
+from tqdm import tqdm
 
 
 def load_data(file_path):
@@ -168,18 +170,35 @@ def classify_samples(tokenizer, model, prompts, batch_size=8):
     predictions = []
     device = next(model.parameters()).device
 
-    # 如果有GPU，调整批处理大小
+    # 优化GPU批处理大小
     if torch.cuda.is_available():
-        mem = torch.cuda.get_device_properties(0).total_memory / 1e9
-        batch_size = min(batch_size, max(1, int(mem) // 2))
-        print(f"Using batch size: {batch_size}")
+        gpu = torch.cuda.get_device_properties(0)
+        mem_gb = gpu.total_memory / 1e9
+        # 根据GPU内存动态调整批大小
+        suggested_batch = max(
+            1, min(int(mem_gb // 5), 32)
+        )  # 每5GB内存约一个批次，上限32
+        if batch_size == 1:  # 用户未明确设置批大小
+            batch_size = suggested_batch
+            print(
+                f"Auto-tuned batch size: {batch_size} based on {mem_gb:.1f}GB GPU memory"
+            )
+        else:
+            print(
+                f"Using user-specified batch size: {batch_size} (GPU: {mem_gb:.1f}GB)"
+            )
+    else:
+        print(f"Using CPU with batch size: {batch_size}")
 
+    # 显示进度条
+    total_batches = (len(prompts) + batch_size - 1) // batch_size
+    pbar = tqdm(total=total_batches, desc="Processing batches")
+
+    start_time = time.time()
     # 批量处理
     for i in range(0, len(prompts), batch_size):
         batch = prompts[i : i + batch_size]
-        print(
-            f"Processing batch {i//batch_size + 1}/{(len(prompts)-1)//batch_size + 1}"
-        )
+        batch_start = time.time()
 
         try:
             # 使用padding处理批次
@@ -210,19 +229,25 @@ def classify_samples(tokenizer, model, prompts, batch_size=8):
                 prediction = parse_answer(full_text)
                 predictions.append(prediction)
 
-                # 打印详情
-                print(f"Prediction for sample {i+j+1}: {prediction}")
-
-                # 打印前几个样本的详细信息
+                # 打印首批样本的详细信息
                 if i == 0 and j < 3:
                     print(f"  Sample {j+1}:")
                     print(f"    Prompt: {batch[j]}")
                     print(f"    Generated: {generated_text}")
                     print(f"    Full text: {full_text}")
+                    print(f"    Prediction: {prediction}")
+
+            # 计算并显示批处理速度
+            batch_time = time.time() - batch_start
+            samples_per_sec = len(batch) / batch_time
+            pbar.set_postfix(
+                samples_per_sec=f"{samples_per_sec:.1f}",
+                batch_time=f"{batch_time:.2f}s",
+            )
 
         except Exception as e:
             print(f"Error in batch processing: {e}")
-            # 单条回退
+            # 单条回退处理
             for j, prompt in enumerate(batch):
                 try:
                     print(f"Processing individual prompt {i+j+1}")
@@ -241,11 +266,21 @@ def classify_samples(tokenizer, model, prompts, batch_size=8):
                     # 解析答案
                     prediction = parse_answer(full_text)
                     predictions.append(prediction)
-                    print(f"Prediction for sample {i+j+1}: {prediction}")
 
                 except Exception as inner_e:
                     print(f"Error in single sample processing: {inner_e}")
                     predictions.append("UNKNOWN")
+
+        pbar.update(1)
+
+    pbar.close()
+
+    # 计算总处理速度
+    total_time = time.time() - start_time
+    avg_samples_per_sec = len(prompts) / total_time
+    print(
+        f"Total processing time: {total_time:.2f}s, Average speed: {avg_samples_per_sec:.1f} samples/sec"
+    )
 
     # 打印预测分布
     supported_count = predictions.count("SUPPORTED")
@@ -352,46 +387,58 @@ def main():
         "--batch_size",
         type=int,
         default=1,
-        help="Batch size (使用1表示单样本处理，大于1启用批处理)",
+        help="Batch size (default=1, auto-scales on GPU, set >1 for explicit size)",
     )
     parser.add_argument(
         "--output_dir", default="./results", help="Directory to save results"
     )
     parser.add_argument(
-        "--full_dataset", action="store_true", help="处理完整数据集而不是前50行"
+        "--full_dataset",
+        action="store_true",
+        help="Process complete dataset instead of first 50 rows",
     )
     args = parser.parse_args()
 
     # 确保输出目录存在
     os.makedirs(args.output_dir, exist_ok=True)
 
+    start_time = time.time()
+
     # 加载数据
     if args.full_dataset:
         df = pd.read_csv(args.data_path)
-        print("Processing full dataset")
+        print(f"Processing full dataset: {len(df)} samples")
     else:
         df = load_data(args.data_path)
-        print("Processing first 50 samples only (use --full_dataset to process all)")
+        print(f"Processing first 50 samples only (use --full_dataset to process all)")
 
     # 构建提示
     original_prompts, adversarial_prompts, skipped_samples, valid_samples = (
         construct_prompts(df)
     )
+    prep_time = time.time() - start_time
+    print(f"Prompt preparation completed in {prep_time:.2f}s")
 
     # 加载模型
     tokenizer, model = load_model(args.model, args.token)
 
     # 对原始样本进行分类
     print("\nClassifying original samples...")
+    orig_start = time.time()
     original_predictions = classify_samples(
         tokenizer, model, original_prompts, args.batch_size
     )
+    orig_time = time.time() - orig_start
+    print(f"Original sample classification completed in {orig_time:.2f}s")
 
     # 对对抗性样本进行分类
     print("\nClassifying adversarial samples...")
+    adv_start = time.time()
     adversarial_predictions = classify_samples(
         tokenizer, model, adversarial_prompts, args.batch_size
     )
+    adv_time = time.time() - adv_start
+    print(f"Adversarial sample classification completed in {adv_time:.2f}s")
 
     # 移除被跳过的样本
     valid_df = df.drop(index=skipped_samples).reset_index(drop=True)
@@ -400,6 +447,13 @@ def main():
     result_df = compare_results(
         valid_df, original_predictions, adversarial_predictions, valid_samples
     )
+
+    # 输出总体性能统计
+    total_time = time.time() - start_time
+    samples_per_sec = valid_samples * 2 / (orig_time + adv_time)  # 原始+对抗性样本
+    print(f"\nPerformance summary:")
+    print(f"  Total time: {total_time:.2f}s")
+    print(f"  Processing speed: {samples_per_sec:.2f} samples/sec")
 
     # 保存结果
     model_name_short = args.model.split("/")[-1]
