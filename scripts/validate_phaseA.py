@@ -5,7 +5,7 @@ from peft import PeftModel
 from phaseA_llama1b_fever import WikiCache  # Assuming this is in PYTHONPATH or same dir
 
 BASE = "meta-llama/Llama-3.2-3B-Instruct"
-LORA = "./phaseA_llama3B"  # 你的输出目录
+# LORA = "./phaseA_llama3B"  # 你的输出目录
 
 tok = AutoTokenizer.from_pretrained(BASE, use_fast=False, padding_side="left")
 
