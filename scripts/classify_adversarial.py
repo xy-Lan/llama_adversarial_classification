@@ -22,27 +22,33 @@ def construct_prompts(df):
     adversarial_prompts = []
     skipped_samples = []  # 记录被剔除的样本索引
 
+    # --- Define System Message (consistent with phaseA_llama1b_fever.py) ---
+    # Assuming keep_nei is False for this classification script, as it's a binary task here.
+    sys_msg = (
+        "<<SYS>>\\n"
+        "You are a fact-checking assistant.\\n"
+        "Given EVIDENCE and a CLAIM, reply with exactly one token: SUPPORTED or REFUTED.\\n"
+        "Do not output anything else.\\n"
+        "<</SYS>>"
+    )
+    # --- End System Message Definition ---
+
     for index, row in df.iterrows():
         original_sample = row["original_samples"]
         adversarial_sample = row["adversarial_samples"]
 
-        # 检查原始样本是否为字符串
         if not isinstance(original_sample, str):
             print(f"Skipping sample at index {index}: Original sample not a string.")
             skipped_samples.append(index)
             continue
-
         original_sample = original_sample.strip()
 
-        # 检查对抗性样本是否为字符串
         if not isinstance(adversarial_sample, str):
             print(f"Skipping sample at index {index}: Adversarial sample not a string.")
             skipped_samples.append(index)
             continue
-
         adversarial_sample = adversarial_sample.strip()
 
-        # 检查分隔符是否存在（针对原始和对抗性样本）
         if "~" not in original_sample or "~" not in adversarial_sample:
             print(
                 f"Skipping sample at index {index}: Missing '~' separator in one or both samples."
@@ -50,7 +56,6 @@ def construct_prompts(df):
             skipped_samples.append(index)
             continue
 
-        # 检查原始样本分割结果是否有效
         original_parts = original_sample.split("~", 1)
         if (
             len(original_parts) != 2
@@ -63,7 +68,6 @@ def construct_prompts(df):
             skipped_samples.append(index)
             continue
 
-        # 检查对抗性样本分割结果是否有效
         adversarial_parts = adversarial_sample.split("~", 1)
         if (
             len(adversarial_parts) != 2
@@ -76,33 +80,30 @@ def construct_prompts(df):
             skipped_samples.append(index)
             continue
 
-        # 构建原始和对抗性 Prompts - 专为Llama 3.2优化的格式
         evidence_original, claim_original = original_parts
         evidence_adversarial, claim_adversarial = adversarial_parts
 
-        # 使用Llama 3.2适用的清晰指令格式
+        # --- Updated Prompt Construction (matching phaseA_llama1b_fever.py) ---
         original_prompt = (
-            "<|begin_of_text|><|user|>\n"
-            f"Evidence: {evidence_original.strip()}\n"
-            f"Claim: {claim_original.strip()}\n"
-            "Is this claim supported or refuted based on the evidence? Answer with only one word: SUPPORTED or REFUTED.\n"
-            "<|end_of_text|>\n"
-            "<|assistant|>\n"
+            f"<s>[INST] {sys_msg}\\n"
+            f"Evidence: {evidence_original.strip()}\\n"
+            f"Claim: {claim_original.strip()}\\n"
+            "Question: Is the claim supported or refuted by the evidence?\\n"
+            "Answer:[/INST] "
         )
 
         adversarial_prompt = (
-            "<|begin_of_text|><|user|>\n"
-            f"Evidence: {evidence_adversarial.strip()}\n"
-            f"Claim: {claim_adversarial.strip()}\n"
-            "Is this claim supported or refuted based on the evidence? Answer with only one word: SUPPORTED or REFUTED.\n"
-            "<|end_of_text|>\n"
-            "<|assistant|>\n"
+            f"<s>[INST] {sys_msg}\\n"
+            f"Evidence: {evidence_adversarial.strip()}\\n"
+            f"Claim: {claim_adversarial.strip()}\\n"
+            "Question: Is the claim supported or refuted by the evidence?\\n"
+            "Answer:[/INST] "
         )
+        # --- End Updated Prompt Construction ---
 
         original_prompts.append(original_prompt)
         adversarial_prompts.append(adversarial_prompt)
 
-    # 统计有效样本总数
     total_samples = len(df)
     valid_samples = total_samples - len(skipped_samples)
 
