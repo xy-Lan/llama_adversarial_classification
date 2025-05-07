@@ -184,19 +184,17 @@ def batch_predict_generate(prompts_list, batch_s=BATCH_SIZE):
 
         for gen_text in generated_texts:
             normalized_gen_text = gen_text.upper().strip()
-            first_word = normalized_gen_text.split()[0] if normalized_gen_text else ""
+            # 移除所有空格和换行符
+            normalized_without_spaces = ''.join(normalized_gen_text.split())
             
-            if first_word.startswith("SUPPORTED"):
+            if "SUPPORTED" in normalized_without_spaces:
                 preds.append("SUPPORTED")
-            elif first_word.startswith("REFUTED"):
+            elif "REFUTED" in normalized_without_spaces:
                 preds.append("REFUTED")
             else:
-                if normalized_gen_text.startswith("SUPPORTED"): # Fallback
-                    preds.append("SUPPORTED")
-                elif normalized_gen_text.startswith("REFUTED"): # Fallback
-                    preds.append("REFUTED")
-                else:
-                    preds.append("OTHER")
+                # 可选：记录无法识别的答案
+                print(f"Unrecognized answer: '{gen_text}'")
+                preds.append("OTHER")
     return preds
 
 # ... (rest of the script: run prediction, calculate accuracy, print results)
