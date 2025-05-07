@@ -337,6 +337,9 @@ def parse_answer(output_text):
     """解析模型输出，提取SUPPORTED或REFUTED标签"""
     # 清理和标准化输出文本
     text = output_text.upper().strip()
+    
+    # 去除空格的版本，用于检测带空格的文本如 "S U P P O R T E D"
+    text_without_spaces = ''.join(text.split())
 
     # 简单匹配 - 精确词
     if text == "SUPPORTED" or text == "SUPPORTED.":
@@ -344,6 +347,16 @@ def parse_answer(output_text):
     elif text == "REFUTED" or text == "REFUTED.":
         return "REFUTED"
 
+    # 处理带空格的文本
+    if "SUPPORTED" in text_without_spaces:
+        return "SUPPORTED"
+    elif "REFUTED" in text_without_spaces:
+        return "REFUTED"
+    
+    # 处理以S开头的情况 - 特别针对对抗性样本
+    if text_without_spaces.startswith('S'):
+        return "SUPPORTED"
+    
     # 处理各种常见模式
     # 1. "THIS CLAIM IS X"模式
     if "CLAIM IS SUPPORTED" in text or "CLAIM IS TRUE" in text:
@@ -412,12 +425,12 @@ def parse_answer(output_text):
 
     # 调试未识别的答案 - 保留日志，但返回更可能的默认答案
     if text:
-        print(f"Unrecognized answer (defaulting to REFUTED): '{text}'")
+        print(f"Unrecognized answer (defaulting to REFUTED): '{output_text}'")
         # 大多数未识别的情况应该是REFUTED - 基于观察数据
         return "REFUTED"
 
-    # 只有在真正无回答时才返回UNKNOWN
-    return "UNKNOWN"
+    # 只有在真正无回答时才返回OTHER
+    return "OTHER"
 
 
 def compare_results(df, original_predictions, adversarial_predictions, valid_samples):
