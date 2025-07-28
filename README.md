@@ -39,7 +39,9 @@ Please use the corresponding classification script below based on the model you 
 Note: Replace the default test data set with the test set path scripts_csv/test.csv
 
 You can specify the test dataset path using the --data_file argument, for example:
+```bash
 python scripts/classify_adversarial.py ----data_file scripts_csv/test.csv
+```
 ## Usage
 
 Please refer to the individual scripts for specific command-line arguments and usage instructions. Ensure that the necessary datasets (FEVER, CheckThat! Lab, adversarial samples) are correctly placed and paths are configured within the scripts or via arguments.
