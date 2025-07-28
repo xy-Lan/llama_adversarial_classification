@@ -52,6 +52,7 @@ def build_prompt_llama3(sys_msg_content: str, evidence: str, claim: str) -> str:
 # MODIFIED: prepare_dataset now takes tokenizer as an argument
 def prepare_dataset(tokenizer: AutoTokenizer, keep_nei=False, cache_dir=None) -> Dataset:
     raw  = load_dataset("fever", "v1.0", split="train", cache_dir=cache_dir, trust_remote_code=True)
+    print(f"DEBUG 检查phaseA: Loaded 'raw' dataset. Length: {len(raw)}")
     wiki = WikiCache(cache_dir)
         
     current_sys_msg = llama3_system_message_train_nei if keep_nei else llama3_system_message_train
@@ -96,7 +97,7 @@ def build_trainer(cfg) -> SFTTrainer:
     # Load tokenizer
     # For SFTTrainer with dataset_text_field, add_eos_token=False is usually correct
     # if the text field already contains the EOS token.
-    tok = AutoTokenizer.from_pretrained(cfg.model_id, add_eos_token=False, use_fast=False)
+    tok = AutoTokenizer.from_pretrained(cfg.model_id, add_eos_token=False, use_fast=False, use_auth_token="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")
     
     if tok.pad_token is None:
         print("Tokenizer does not have a pad_token. Setting pad_token to eos_token.")
@@ -111,7 +112,7 @@ def build_trainer(cfg) -> SFTTrainer:
     print(f"---------------------------------\n")
 
     # Load base model
-    base = AutoModelForCausalLM.from_pretrained(cfg.model_id, device_map="auto", torch_dtype="auto")
+    base = AutoModelForCausalLM.from_pretrained(cfg.model_id, device_map="auto", torch_dtype="auto", use_auth_token="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")
     
     # Apply LoRA
     lora_config = LoraConfig(
@@ -168,7 +169,7 @@ def cli():
     ap.add_argument("--fp16", action="store_true", help="Enable FP16 training.")
     ap.add_argument("--bf16", action="store_true", help="Enable BF16 training.")
     ap.add_argument("--keep_nei", action="store_true", help="Include NOT ENOUGH INFO (3-way classification).")
-    ap.add_argument("--cache_dir", default=None, help="Directory for Hugging Face datasets cache.")
+    ap.add_argument("--cache_dir", default="/mnt/parscratch/users/acc22xl/huggingface", help="Directory for Hugging Face datasets cache.")
     return ap.parse_args()
 
 # ------------------------- MAIN ---------------------------
@@ -193,4 +194,3 @@ if __name__ == "__main__":
     print(f"\nSaving model to {cfg.output_dir}...")
     trainer.save_model(cfg.output_dir) # Saves LoRA adapter
     print("Model saved.")
-

@@ -9,29 +9,30 @@ import time
 from tqdm import tqdm
 from peft import PeftModel
 
+# Correct the target cache directory path
+CACHE_DIR_TARGET = "/mnt/parscratch/users/acc22xl/huggingface_cache/"
+os.environ["HF_HOME"] = CACHE_DIR_TARGET
+os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR_TARGET
+os.environ["HF_DATASETS_CACHE"] = CACHE_DIR_TARGET
+os.environ["HF_METRICS_CACHE"] = CACHE_DIR_TARGET # Though less common, update for consistency
+
 
 def load_data(file_path):
-    # 与原CPU版本保持一致，只加载前50行数据
     df = pd.read_csv(file_path)
-    # df = pd.read_csv(file_path, nrows=50)
     return df
 
 
-def construct_prompts(df):
-    original_prompts = []
-    adversarial_prompts = []
-    skipped_samples = []  # 记录被剔除的样本索引
+def construct_prompts_for_llama3(df, tokenizer):
+    original_prompt_messages = []
+    adversarial_prompt_messages = []
+    skipped_samples = []  # record the indices of samples that are skipped
 
-    # --- Define System Message (consistent with phaseA_llama1b_fever.py) ---
-    # Assuming keep_nei is False for this classification script, as it's a binary task here.
-    sys_msg = (
-        "<<SYS>>\\n"
-        "You are a fact-checking assistant.\\n"
-        "Given EVIDENCE and a CLAIM, reply with exactly one token: SUPPORTED or REFUTED.\\n"
-        "Do not output anything else.\\n"
-        "<</SYS>>"
+    # Llama 3 system message
+    system_message_content = (
+        "You are a fact-checking assistant. "
+        "Given EVIDENCE and a CLAIM, reply with exactly one token: SUPPORTED or REFUTED. "
+        "Do not output anything else."
     )
-    # --- End System Message Definition ---
 
     for index, row in df.iterrows():
         original_sample = row["original_samples"]
@@ -83,26 +84,37 @@ def construct_prompts(df):
         evidence_original, claim_original = original_parts
         evidence_adversarial, claim_adversarial = adversarial_parts
 
-        # --- Updated Prompt Construction (matching phaseA_llama1b_fever.py) ---
-        original_prompt = (
-            f"<s>[INST] {sys_msg}\\n"
+        # Construct user message content
+        user_message_original_content = (
             f"Evidence: {evidence_original.strip()}\\n"
             f"Claim: {claim_original.strip()}\\n"
             "Question: Is the claim supported or refuted by the evidence?\\n"
-            "Answer:[/INST] "
+            "Answer:"
         )
 
-        adversarial_prompt = (
-            f"<s>[INST] {sys_msg}\\n"
+        user_message_adversarial_content = (
             f"Evidence: {evidence_adversarial.strip()}\\n"
             f"Claim: {claim_adversarial.strip()}\\n"
             "Question: Is the claim supported or refuted by the evidence?\\n"
-            "Answer:[/INST] "
+            "Answer:"
         )
-        # --- End Updated Prompt Construction ---
 
-        original_prompts.append(original_prompt)
-        adversarial_prompts.append(adversarial_prompt)
+        # Llama 3 chat format
+        original_messages = [
+            {"role": "system", "content": system_message_content},
+            {"role": "user", "content": user_message_original_content},
+            # The model should generate the assistant's response.
+            # We add a placeholder for the assistant role here to guide the model.
+            # The tokenizer.apply_chat_template will typically add the assistant prompt.
+        ]
+
+        adversarial_messages = [
+            {"role": "system", "content": system_message_content},
+            {"role": "user", "content": user_message_adversarial_content},
+        ]
+
+        original_prompt_messages.append(original_messages)
+        adversarial_prompt_messages.append(adversarial_messages)
 
     total_samples = len(df)
     valid_samples = total_samples - len(skipped_samples)
@@ -111,10 +123,15 @@ def construct_prompts(df):
     print(f"Skipped samples: {len(skipped_samples)}")
     print(f"Valid samples: {valid_samples}")
 
-    return original_prompts, adversarial_prompts, skipped_samples, valid_samples
+    return (
+        original_prompt_messages,
+        adversarial_prompt_messages,
+        skipped_samples,
+        valid_samples,
+    )
 
 
-def load_model(model_name, token=None, lora_path=None):
+def load_model(model_name, token=None, lora_path=None, cache_dir=None):
     """加载模型和分词器，支持多种加载选项，包括LoRA"""
     print("Loading model...")
 
@@ -146,18 +163,27 @@ def load_model(model_name, token=None, lora_path=None):
         "use_auth_token": token,
         "device_map": "auto",
         "torch_dtype": torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        "cache_dir": cache_dir
     }
 
     # 加载tokenizer
-    print(f"Loading tokenizer for base model: {model_name}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token)
+    print(f"Loading tokenizer for base model: {model_name} using cache: {cache_dir}...")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token, cache_dir=cache_dir)
 
-    # 重要：设置左侧填充以解决批处理问题
+    # 重要：Llama 3 typically expects left padding for batched generation.
     tokenizer.padding_side = "left"
 
     # 确保pad token存在
     if tokenizer.pad_token is None:
+        # For Llama 3, if a pad token is not explicitly set,
+        # it's often set to eos_token. However, it's better to ensure it's explicitly set.
+        # Check if model config specifies a pad_token_id, otherwise use eos_token_id.
+        # If a specific pad_token is needed, it should be added to the tokenizer vocab
+        # and resized model embeddings. For now, eos_token is a common choice.
+        print("pad_token is None. Setting pad_token = eos_token")
         tokenizer.pad_token = tokenizer.eos_token
+        # Make sure the model's pad_token_id is also updated if necessary
+        # model.config.pad_token_id = tokenizer.pad_token_id
 
     # 加载基础模型
     try:
@@ -167,7 +193,7 @@ def load_model(model_name, token=None, lora_path=None):
         print(f"Error loading base model: {e}")
         print("Falling back to basic loading for base model...")
         model = AutoModelForCausalLM.from_pretrained(
-            model_name, use_auth_token=token, torch_dtype=torch.float32
+            model_name, use_auth_token=token, torch_dtype=torch.float32, cache_dir=cache_dir
         )
         if torch.cuda.is_available():
             model = model.to("cuda")
@@ -195,10 +221,17 @@ def load_model(model_name, token=None, lora_path=None):
     device = next(model.parameters()).device
     print(f"Model (final) loaded successfully on {device}")
 
+    # It's good practice to ensure the model's config also reflects the pad_token_id used by the tokenizer
+    if model.config.pad_token_id is None and tokenizer.pad_token_id is not None:
+        print(
+            f"Setting model.config.pad_token_id to tokenizer.pad_token_id ({tokenizer.pad_token_id})"
+        )
+        model.config.pad_token_id = tokenizer.pad_token_id
+
     return tokenizer, model
 
 
-def classify_samples(tokenizer, model, prompts, batch_size=8):
+def classify_samples(tokenizer, model, prompt_messages_list, batch_size=8):
     predictions = []
     device = next(model.parameters()).device
 
@@ -223,18 +256,29 @@ def classify_samples(tokenizer, model, prompts, batch_size=8):
         print(f"Using CPU with batch size: {batch_size}")
 
     # 显示进度条
-    total_batches = (len(prompts) + batch_size - 1) // batch_size
+    total_batches = (len(prompt_messages_list) + batch_size - 1) // batch_size
     pbar = tqdm(total=total_batches, desc="Processing batches")
 
     start_time = time.time()
     # 批量处理
-    for i in range(0, len(prompts), batch_size):
-        batch = prompts[i : i + batch_size]
+    for i in range(0, len(prompt_messages_list), batch_size):
+        batch_messages = prompt_messages_list[i : i + batch_size]
         batch_start = time.time()
+
+        # Apply Llama 3 chat template
+        # add_generation_prompt=True adds the prompt for the assistant's turn
+        batch_prompts_formatted = [
+            tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            for messages in batch_messages
+        ]
 
         try:
             # 使用padding处理批次 - 确保左侧填充
-            inputs = tokenizer(batch, padding=True, return_tensors="pt").to(device)
+            inputs = tokenizer(
+                batch_prompts_formatted, padding=True, return_tensors="pt"
+            ).to(device)
 
             with torch.no_grad():
                 outputs = model.generate(
@@ -265,13 +309,13 @@ def classify_samples(tokenizer, model, prompts, batch_size=8):
                 # 打印首批样本的详细信息
                 if i == 0 and j < 3:
                     print(f"  Sample {j+1}:")
-                    print(f"    Prompt: {batch[j]}")
+                    print(f"    Prompt: {batch_prompts_formatted[j]}")
                     print(f"    Generated: {generated_text}")
                     print(f"    Prediction: {prediction}")
 
             # 计算并显示批处理速度
             batch_time = time.time() - batch_start
-            samples_per_sec = len(batch) / batch_time
+            samples_per_sec = len(batch_prompts_formatted) / batch_time
             pbar.set_postfix(
                 samples_per_sec=f"{samples_per_sec:.1f}",
                 batch_time=f"{batch_time:.2f}s",
@@ -280,7 +324,7 @@ def classify_samples(tokenizer, model, prompts, batch_size=8):
         except Exception as e:
             print(f"Error in batch processing: {e}")
             # 单条回退处理
-            for j, prompt in enumerate(batch):
+            for j, prompt in enumerate(batch_prompts_formatted):
                 try:
                     print(f"Processing individual prompt {i+j+1}")
                     inputs = tokenizer(prompt, return_tensors="pt").to(device)
@@ -312,7 +356,7 @@ def classify_samples(tokenizer, model, prompts, batch_size=8):
 
     # 计算总处理速度
     total_time = time.time() - start_time
-    avg_samples_per_sec = len(prompts) / total_time
+    avg_samples_per_sec = len(prompt_messages_list) / total_time
     print(
         f"Total processing time: {total_time:.2f}s, Average speed: {avg_samples_per_sec:.1f} samples/sec"
     )
@@ -334,96 +378,128 @@ def classify_samples(tokenizer, model, prompts, batch_size=8):
 
 
 def parse_answer(output_text):
-    """解析模型输出，提取SUPPORTED或REFUTED标签"""
-    # 清理和标准化输出文本
-    text = output_text.upper().strip()
+    # 尝试从模型输出中提取 "SUPPORTED" 或 "REFUTED"
+    # Llama 3 might add its own conversational fluff or structure, so be robust.
 
-    # 简单匹配 - 精确词
-    if text == "SUPPORTED" or text == "SUPPORTED.":
+    # First, look for the exact keywords in uppercase
+    if "SUPPORTED" in output_text:
         return "SUPPORTED"
-    elif text == "REFUTED" or text == "REFUTED.":
+    elif "REFUTED" in output_text:
         return "REFUTED"
 
-    # 处理各种常见模式
-    # 1. "THIS CLAIM IS X"模式
-    if "CLAIM IS SUPPORTED" in text or "CLAIM IS TRUE" in text:
+    # Fallback: try lowercase and then try to infer from common phrasing
+    # This part needs to be carefully tuned based on observed model outputs.
+    # For Llama 3, it should be quite good at following the "exactly one token" instruction
+    # if the prompt is clear.
+
+    cleaned_output = output_text.strip().upper()  # Normalize to uppercase
+
+    # Check again after normalizing
+    if "SUPPORTED" in cleaned_output:
         return "SUPPORTED"
-    elif "CLAIM IS REFUTED" in text or "CLAIM IS FALSE" in text:
+    elif "REFUTED" in cleaned_output:
         return "REFUTED"
 
-    # 2. 基于关键词的匹配
-    if "SUPPORTED" in text and not any(
-        neg in text for neg in ["NOT SUPPORTED", "ISN'T SUPPORTED"]
-    ):
-        return "SUPPORTED"
-    elif "REFUTED" in text:
-        return "REFUTED"
+    # If still not found, it's unrecognized
+    print(f"Unrecognized answer: '{output_text}' (defaulting to REFUTED for safety, but please check)")
+    return "REFUTED"  # Defaulting to REFUTED might not always be correct. Consider how to handle.
 
-    # 3. 支持/反对表述
-    if text.startswith("SUPPORT") or "IS SUPPORT" in text:
-        return "SUPPORTED"
-    elif text.startswith("REFUTE") or "IS REFUTE" in text:
-        return "REFUTED"
 
-    # 4. YES/NO回答
-    if "YES" in text:
-        return "SUPPORTED"
-    elif "NO" in text:
-        return "REFUTED"
+def compare_results(df, original_predictions, adversarial_predictions, valid_samples, export_flipped_csv=None):
+    # Add prediction result columns
+    # Ensure indices align correctly, especially if some samples were skipped.
+    # df is the original dataframe, original_predictions/adversarial_predictions are lists for valid samples.
 
-    # 5. 其他常见表述
-    supp_indicators = ["CORRECT", "TRUE", "ACCURATE", "RIGHT", "VALID"]
-    refut_indicators = [
-        "INCORRECT",
-        "FALSE",
-        "INACCURATE",
-        "WRONG",
-        "INVALID",
-        "NOT TRUE",
+    # Create series with NaNs for all original indices
+    original_pred_series = pd.Series([None] * len(df), index=df.index)
+    adversarial_pred_series = pd.Series([None] * len(df), index=df.index)
+
+    # Get valid indices (those not skipped)
+    valid_indices = df.index.drop(
+        df[df["original_samples"].isna()].index
+    )  # Assuming NaNs mark skipped or initially bad rows
+    # If skipped_samples list was maintained, use that to get valid_indices more directly:
+    # all_indices = df.index.tolist()
+    # valid_indices = [idx for idx in all_indices if idx not in skipped_samples_from_construct_prompts]
+    # For now, relying on the structure that predictions align with valid samples.
+
+    # This assumes original_predictions and adversarial_predictions only contain results for valid, processed samples.
+    # We need to map these back to the original DataFrame's indices.
+
+    # Let's refine this: construct_prompts returns 'skipped_samples' which are indices from the input df.
+    # We can use this to correctly align.
+
+    # Get all indices from the DataFrame
+    all_df_indices = df.index.tolist()
+
+    # Determine valid indices by excluding skipped ones
+    # This assumes `skipped_samples` contains the original DataFrame indices that were skipped
+    # This part will need the `skipped_samples` list from the prompt construction step to be passed here
+    # For now, we'll assume a direct mapping for simplicity if `skipped_samples` is not available here.
+    # A better approach is to pass `skipped_samples` to this function or handle it in main.
+
+    # Placeholder: This alignment needs to be robust.
+    # If `valid_samples` corresponds to the length of `original_predictions`,
+    # and we know which samples were *not* skipped, we can map them.
+
+    # Let's assume `original_predictions` and `adversarial_predictions` are for the samples
+    # that were *not* skipped during prompt construction.
+    # The `df` here is the full dataframe. We need to put predictions into the correct rows.
+
+    # Create temporary columns filled with a placeholder (e.g., np.nan or an empty string)
+    df["original_prediction"] = pd.NA
+    df["adversarial_prediction"] = pd.NA
+
+    # Iterate through the original DataFrame and fill predictions if the sample was processed
+    # This requires knowing which original indices correspond to the predictions.
+    # If `construct_prompts_for_llama3` returns `skipped_samples` (indices of df),
+    # then we can create a list of processed_indices.
+
+    # Simplification: Assuming predictions directly map to the first `valid_samples` rows of `df`
+    # that were not skipped. This is often the case if `df` is filtered *before* this function.
+    # However, the current `load_data` loads the whole df.
+
+    # Robust approach:
+    # 1. `construct_prompts_for_llama3` returns `skipped_samples_indices` (original df indices)
+    # 2. In `main`, filter `df` to get `processed_df` before calling `classify_samples` OR
+    # 3. In `main`, pass `skipped_samples_indices` to `compare_results`.
+
+    # For this edit, I'll assume `original_predictions` and `adversarial_predictions`
+    # are lists that correspond to the rows of `df` that were NOT skipped.
+    # The `main` function will need to handle the alignment.
+    # This function will just add columns based on the provided lists.
+
+    pred_idx_orig = 0
+    pred_idx_adv = 0
+
+    # We need a way to know which rows in df were processed.
+    # Let's assume for now that the `main` function will handle providing df
+    # that only contains processed rows, or that `original_predictions` has NaNs for skipped.
+    # The provided `df` here is the full one.
+
+    # A simple way if the lists are dense for processed samples:
+    processed_indices = [
+        idx
+        for idx in df.index
+        if idx not in df.attrs.get("skipped_samples_indices", [])
     ]
 
-    # 检查是否包含支持性指示词
-    for word in supp_indicators:
-        if word in text and not any(
-            neg + " " + word in text for neg in ["NOT", "ISN'T", "IS NOT"]
-        ):
-            return "SUPPORTED"
+    if len(processed_indices) == len(original_predictions) and len(
+        processed_indices
+    ) == len(adversarial_predictions):
+        df.loc[processed_indices, "original_prediction"] = original_predictions
+        df.loc[processed_indices, "adversarial_prediction"] = adversarial_predictions
+    else:
+        print(
+            "Warning: Mismatch in length between processed indices and predictions. Predictions may not be aligned correctly."
+        )
+        # Fallback to direct assignment if lengths match df (less robust if there were skips)
+        if len(df) == len(original_predictions):
+            df["original_prediction"] = original_predictions
+        if len(df) == len(adversarial_predictions):
+            df["adversarial_prediction"] = adversarial_predictions
 
-    # 检查是否包含否定性指示词
-    for word in refut_indicators:
-        if word in text:
-            return "REFUTED"
-
-    # 6. 根据模型回答更广泛的理解 - Llama 3.2特定的启发式方法
-    # 注意：以下基于实际观察的模型行为进行调整
-
-    # 对于描述性开头的回答，查找内容提示
-    if "THIS IS " in text:
-        # 默认回答REFUTED，因为这类回答更常用于修正错误
-        if "DANCER" in text or "CLOWN" in text or "RAPPER" in text:
-            return "REFUTED"  # 特定情况处理
-        elif any(kw in text for kw in ["NOVEL", "BOOK", "CHARLES DICKENS"]):
-            return "SUPPORTED"  # 特定情况处理
-
-    # 对于"THIS RESPONSE IS"开头的文本，需要更仔细分析
-    if "THIS RESPONSE" in text or "THIS STATEMENT" in text:
-        # 基于实际答案模式的默认行为
-        return "SUPPORTED"
-
-    # 调试未识别的答案 - 保留日志，但返回更可能的默认答案
-    if text:
-        print(f"Unrecognized answer (defaulting to REFUTED): '{text}'")
-        # 大多数未识别的情况应该是REFUTED - 基于观察数据
-        return "REFUTED"
-
-    # 只有在真正无回答时才返回UNKNOWN
-    return "UNKNOWN"
-
-
-def compare_results(df, original_predictions, adversarial_predictions, valid_samples):
-    # Add prediction result columns
-    df["original_prediction"] = original_predictions
-    df["adversarial_prediction"] = adversarial_predictions
+    df["comparison_result"] = "Not Run"  # Default
 
     # --- New: Handle 'correctness' column and calculate Clean Accuracy ---
     if "correctness" not in df.columns:
@@ -518,7 +594,7 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
         if num_correct_and_mp > 0:
             mp_flip_rate_targeted = flips_in_meaning_preserving / num_correct_and_mp
         else:
-            mp_flip_rate_targeted = float('nan')
+            mp_flip_rate_targeted = float("nan")
         print(
             f"Targeted MP Flip Rate (Meaning-Preserving Flips / MP & Correctly Classified Originals): {mp_flip_rate_targeted:.2%} ({flips_in_meaning_preserving}/{num_correct_and_mp})"
         )
@@ -544,113 +620,158 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
     # Ensure 'Flipped sample examples' section is removed as requested
     # The original code for printing examples is now omitted.
 
+    if export_flipped_csv:
+        if "correctness" in df.columns and "original_is_correct" in meaning_preserving_df.columns: # Check prerequisites
+            # This is the base for the numerator: meaning-preserving and originally correct
+            base_df_for_numerator = meaning_preserving_df[
+                meaning_preserving_df["original_is_correct"]
+            ]
+            
+            # These are the actual samples that make up the numerator
+            flipped_samples_to_export_df = base_df_for_numerator[
+                base_df_for_numerator["prediction_flipped"] == True
+            ].copy()
+
+            if not flipped_samples_to_export_df.empty:
+                # Define columns to export - ensure these exist in the source df or are created
+                columns_to_select = [
+                    "original_samples", 
+                    "adversarial_samples", 
+                    "correctness", # Original ground truth
+                    "agreed_labels", # Should be 0 for these meaning-preserving samples
+                    "original_prediction", 
+                    "adversarial_prediction",
+                    "prediction_flipped" # Should be True for these samples
+                ]
+                
+                # Ensure all selected columns are present in the dataframe to avoid KeyErrors
+                # flipped_samples_to_export_df may not have all columns from the original `df` if it's a slice of a slice.
+                # It's safer to re-select from the original `df` using the indices of the flipped samples.
+                # The indices of flipped_samples_to_export_df are from the original df.
+                
+                export_df = df.loc[flipped_samples_to_export_df.index, columns_to_select].copy()
+                
+                export_df.to_csv(export_flipped_csv, index=False)
+                print(f"\nExported {len(export_df)} samples (numerator of 'Flip Rate (MP & Correct Originals)') to: {export_flipped_csv}")
+            else:
+                print(f"\nNo samples to export for 'Flip Rate (MP & Correct Originals)' numerator (path: {export_flipped_csv}).")
+        else:
+            print(f"\nCould not export flipped samples to {export_flipped_csv} because 'correctness' or 'original_is_correct' column was missing from relevant dataframe.")
+
     return df
 
 
 def main():
     # 命令行参数
     parser = argparse.ArgumentParser(
-        description="Classify FEVER dataset with Llama model"
+        description="Classify original and adversarial samples using a Llama model."
     )
     parser.add_argument(
-        "--model",
-        default="meta-llama/Llama-3.2-1B-Instruct",
-        help="Base model name or path",
+        "--model_name",
+        type=str,
+        default="meta-llama/Llama-3.2-1B-Instruct",  # Default to Llama 3
+        help="Name of the model to use from Hugging Face Hub (e.g., 'meta-llama/Llama-3.2-1B-Instruct').",
     )
     parser.add_argument(
         "--lora_path",
+        type=str,
         default=None,
-        help="Path to LoRA adapter (fine-tuned model weights)",
+        help="Path to the LoRA weights directory. If None, uses the base model.",
     )
-    parser.add_argument("--token", help="Hugging Face token")
     parser.add_argument(
-        "--data_path",
+        "--data_file",
         default="./data/adversarial_dataset_corrected.csv",
         help="Path to dataset",
     )
     parser.add_argument(
-        "--batch_size",
+        "--output_file",
+        type=str,
+        default="classification_results.csv",
+        help="Path to save the CSV file with classification results.",
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=8, help="Batch size for model inference."
+    )
+    parser.add_argument(
+        "--token", type=str, default="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", help="Hugging Face API token (if needed)."
+    )
+    parser.add_argument(
+        "--max_samples",
         type=int,
-        default=1,
-        help="Batch size (default=1, auto-scales on GPU, set >1 for explicit size)",
+        default=None,
+        help="Maximum number of samples to process from the data file.",
     )
     parser.add_argument(
-        "--output_dir", default="./results", help="Directory to save results"
+        "--export_flipped_csv",
+        type=str,
+        default=None,
+        help="Optional path to save a CSV of (Meaning-Preserving & Correctly Classified Originals) that were flipped.",
     )
     parser.add_argument(
-        "--full_dataset",
-        action="store_true",
-        help="Process complete dataset instead of first 50 rows",
+        "--cache_dir",
+        type=str,
+        default=CACHE_DIR_TARGET,
+        help="Directory for caching Hugging Face models and tokenizers.",
     )
+
     args = parser.parse_args()
 
-    # 确保输出目录存在
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    start_time = time.time()
+    print(f"Starting classification with model: {args.model_name}")
+    if args.lora_path:
+        print(f"Applying LoRA weights from: {args.lora_path}")
+    print(f"Using cache directory: {args.cache_dir}")
 
     # 加载数据
-    if args.full_dataset:
-        df = pd.read_csv(args.data_path)
-        print(f"Processing full dataset: {len(df)} samples")
-    else:
-        df = load_data(args.data_path)
-        print(
-            f"Processing first 50 samples by default (use --full_dataset to process all, or modify load_data)"
-        )
+    df = load_data(args.data_file)
+    if args.max_samples is not None:
+        print(f"Processing a maximum of {args.max_samples} samples.")
+        df = df.head(args.max_samples)
 
-    # 构建提示
-    original_prompts, adversarial_prompts, skipped_samples, valid_samples = (
-        construct_prompts(df)
+    # 加载模型和分词器
+    tokenizer, model = load_model(
+        args.model_name, token=args.token, lora_path=args.lora_path, cache_dir=args.cache_dir
     )
-    prep_time = time.time() - start_time
-    print(f"Prompt preparation completed in {prep_time:.2f}s")
 
-    # 加载模型
-    tokenizer, model = load_model(args.model, args.token, args.lora_path)
+    # 构建prompts
+    print("Constructing prompts for Llama 3 format...")
+    (
+        original_prompt_messages,
+        adversarial_prompt_messages,
+        skipped_samples_indices,  # Store the original indices of skipped samples
+        valid_samples_count,
+    ) = construct_prompts_for_llama3(df, tokenizer)
 
-    # 对原始样本进行分类
+    # Store skipped indices in df attributes for later use in compare_results
+    df.attrs["skipped_samples_indices"] = skipped_samples_indices
+
+    # 分类原始样本
     print("\nClassifying original samples...")
-    orig_start = time.time()
-    original_predictions = classify_samples(
-        tokenizer, model, original_prompts, args.batch_size
+    original_predictions_text = classify_samples(
+        tokenizer, model, original_prompt_messages, batch_size=args.batch_size
     )
-    orig_time = time.time() - orig_start
-    print(f"Original sample classification completed in {orig_time:.2f}s")
+    original_predictions = [parse_answer(pred) for pred in original_predictions_text]
 
-    # 对对抗性样本进行分类
+    # 分类对抗样本
     print("\nClassifying adversarial samples...")
-    adv_start = time.time()
-    adversarial_predictions = classify_samples(
-        tokenizer, model, adversarial_prompts, args.batch_size
+    adversarial_predictions_text = classify_samples(
+        tokenizer, model, adversarial_prompt_messages, batch_size=args.batch_size
     )
-    adv_time = time.time() - adv_start
-    print(f"Adversarial sample classification completed in {adv_time:.2f}s")
+    adversarial_predictions = [
+        parse_answer(pred) for pred in adversarial_predictions_text
+    ]
 
-    # 移除被跳过的样本
-    valid_df = df.drop(index=skipped_samples).reset_index(drop=True)
-
-    # 比较结果
-    result_df = compare_results(
-        valid_df, original_predictions, adversarial_predictions, valid_samples
+    # 比较结果并保存
+    # The df passed here is the original one. compare_results needs to handle skipped samples.
+    df_results = compare_results(
+        df.copy(),  # Pass a copy to avoid modifying the original df inadvertently before this
+        original_predictions,
+        adversarial_predictions,
+        valid_samples_count,  # This is the count of valid samples
+        args.export_flipped_csv # Pass the new argument
     )
-
-    # 输出总体性能统计
-    total_time = time.time() - start_time
-    samples_per_sec = valid_samples * 2 / (orig_time + adv_time)  # 原始+对抗性样本
-    print(f"\nPerformance summary:")
-    print(f"  Total time: {total_time:.2f}s")
-    print(f"  Processing speed: {samples_per_sec:.2f} samples/sec")
-
-    # 保存结果
-    model_name_short = args.model.split("/")[-1]
-    batch_info = f"_batch{args.batch_size}" if args.batch_size > 1 else ""
-    result_path = os.path.join(
-        args.output_dir, f"{model_name_short}{batch_info}_results.csv"
-    )
-    result_df.to_csv(result_path, index=False)
-    print(f"Results saved to {result_path}")
+    # df_results.to_csv(args.output_file, index=False)
+    # print(f"\nResults saved to {args.output_file}")
 
 
 if __name__ == "__main__":
-        main()
+    main()
