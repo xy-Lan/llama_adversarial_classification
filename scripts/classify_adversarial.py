@@ -14,7 +14,9 @@ CACHE_DIR_TARGET = "/mnt/parscratch/users/acc22xl/huggingface_cache/"
 os.environ["HF_HOME"] = CACHE_DIR_TARGET
 os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR_TARGET
 os.environ["HF_DATASETS_CACHE"] = CACHE_DIR_TARGET
-os.environ["HF_METRICS_CACHE"] = CACHE_DIR_TARGET # Though less common, update for consistency
+os.environ["HF_METRICS_CACHE"] = (
+    CACHE_DIR_TARGET  # Though less common, update for consistency
+)
 
 
 def load_data(file_path):
@@ -163,12 +165,14 @@ def load_model(model_name, token=None, lora_path=None, cache_dir=None):
         "use_auth_token": token,
         "device_map": "auto",
         "torch_dtype": torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-        "cache_dir": cache_dir
+        "cache_dir": cache_dir,
     }
 
     # 加载tokenizer
     print(f"Loading tokenizer for base model: {model_name} using cache: {cache_dir}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=token, cache_dir=cache_dir)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, use_auth_token=token, cache_dir=cache_dir
+    )
 
     # 重要：Llama 3 typically expects left padding for batched generation.
     tokenizer.padding_side = "left"
@@ -193,7 +197,10 @@ def load_model(model_name, token=None, lora_path=None, cache_dir=None):
         print(f"Error loading base model: {e}")
         print("Falling back to basic loading for base model...")
         model = AutoModelForCausalLM.from_pretrained(
-            model_name, use_auth_token=token, torch_dtype=torch.float32, cache_dir=cache_dir
+            model_name,
+            use_auth_token=token,
+            torch_dtype=torch.float32,
+            cache_dir=cache_dir,
         )
         if torch.cuda.is_available():
             model = model.to("cuda")
@@ -401,11 +408,19 @@ def parse_answer(output_text):
         return "REFUTED"
 
     # If still not found, it's unrecognized
-    print(f"Unrecognized answer: '{output_text}' (defaulting to REFUTED for safety, but please check)")
+    print(
+        f"Unrecognized answer: '{output_text}' (defaulting to REFUTED for safety, but please check)"
+    )
     return "REFUTED"  # Defaulting to REFUTED might not always be correct. Consider how to handle.
 
 
-def compare_results(df, original_predictions, adversarial_predictions, valid_samples, export_flipped_csv=None):
+def compare_results(
+    df,
+    original_predictions,
+    adversarial_predictions,
+    valid_samples,
+    export_flipped_csv=None,
+):
     # Add prediction result columns
     # Ensure indices align correctly, especially if some samples were skipped.
     # df is the original dataframe, original_predictions/adversarial_predictions are lists for valid samples.
@@ -621,12 +636,15 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
     # The original code for printing examples is now omitted.
 
     if export_flipped_csv:
-        if "correctness" in df.columns and "original_is_correct" in meaning_preserving_df.columns: # Check prerequisites
+        if (
+            "correctness" in df.columns
+            and "original_is_correct" in meaning_preserving_df.columns
+        ):  # Check prerequisites
             # This is the base for the numerator: meaning-preserving and originally correct
             base_df_for_numerator = meaning_preserving_df[
                 meaning_preserving_df["original_is_correct"]
             ]
-            
+
             # These are the actual samples that make up the numerator
             flipped_samples_to_export_df = base_df_for_numerator[
                 base_df_for_numerator["prediction_flipped"] == True
@@ -635,28 +653,36 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
             if not flipped_samples_to_export_df.empty:
                 # Define columns to export - ensure these exist in the source df or are created
                 columns_to_select = [
-                    "original_samples", 
-                    "adversarial_samples", 
-                    "correctness", # Original ground truth
-                    "agreed_labels", # Should be 0 for these meaning-preserving samples
-                    "original_prediction", 
+                    "original_samples",
+                    "adversarial_samples",
+                    "correctness",  # Original ground truth
+                    "agreed_labels",  # Should be 0 for these meaning-preserving samples
+                    "original_prediction",
                     "adversarial_prediction",
-                    "prediction_flipped" # Should be True for these samples
+                    "prediction_flipped",  # Should be True for these samples
                 ]
-                
+
                 # Ensure all selected columns are present in the dataframe to avoid KeyErrors
                 # flipped_samples_to_export_df may not have all columns from the original `df` if it's a slice of a slice.
                 # It's safer to re-select from the original `df` using the indices of the flipped samples.
                 # The indices of flipped_samples_to_export_df are from the original df.
-                
-                export_df = df.loc[flipped_samples_to_export_df.index, columns_to_select].copy()
-                
+
+                export_df = df.loc[
+                    flipped_samples_to_export_df.index, columns_to_select
+                ].copy()
+
                 export_df.to_csv(export_flipped_csv, index=False)
-                print(f"\nExported {len(export_df)} samples (numerator of 'Flip Rate (MP & Correct Originals)') to: {export_flipped_csv}")
+                print(
+                    f"\nExported {len(export_df)} samples (numerator of 'Flip Rate (MP & Correct Originals)') to: {export_flipped_csv}"
+                )
             else:
-                print(f"\nNo samples to export for 'Flip Rate (MP & Correct Originals)' numerator (path: {export_flipped_csv}).")
+                print(
+                    f"\nNo samples to export for 'Flip Rate (MP & Correct Originals)' numerator (path: {export_flipped_csv})."
+                )
         else:
-            print(f"\nCould not export flipped samples to {export_flipped_csv} because 'correctness' or 'original_is_correct' column was missing from relevant dataframe.")
+            print(
+                f"\nCould not export flipped samples to {export_flipped_csv} because 'correctness' or 'original_is_correct' column was missing from relevant dataframe."
+            )
 
     return df
 
@@ -693,7 +719,7 @@ def main():
         "--batch_size", type=int, default=8, help="Batch size for model inference."
     )
     parser.add_argument(
-        "--token", type=str, default="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", help="Hugging Face API token (if needed)."
+        "--token", type=str, default=None, help="Hugging Face API token (if needed)."
     )
     parser.add_argument(
         "--max_samples",
@@ -729,7 +755,10 @@ def main():
 
     # 加载模型和分词器
     tokenizer, model = load_model(
-        args.model_name, token=args.token, lora_path=args.lora_path, cache_dir=args.cache_dir
+        args.model_name,
+        token=args.token,
+        lora_path=args.lora_path,
+        cache_dir=args.cache_dir,
     )
 
     # 构建prompts
@@ -767,7 +796,7 @@ def main():
         original_predictions,
         adversarial_predictions,
         valid_samples_count,  # This is the count of valid samples
-        args.export_flipped_csv # Pass the new argument
+        args.export_flipped_csv,  # Pass the new argument
     )
     # df_results.to_csv(args.output_file, index=False)
     # print(f"\nResults saved to {args.output_file}")

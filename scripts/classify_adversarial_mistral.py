@@ -17,7 +17,9 @@ CACHE_DIR_TARGET = "/mnt/parscratch/users/acc22xl/huggingface_cache/"
 os.environ["HF_HOME"] = CACHE_DIR_TARGET
 os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR_TARGET
 os.environ["HF_DATASETS_CACHE"] = CACHE_DIR_TARGET
-os.environ["HF_METRICS_CACHE"] = CACHE_DIR_TARGET # Though less common, update for consistency
+os.environ["HF_METRICS_CACHE"] = (
+    CACHE_DIR_TARGET  # Though less common, update for consistency
+)
 
 
 def load_data(file_path):
@@ -148,29 +150,35 @@ def load_model(model_name, token=None, lora_path=None, cache_dir=None):
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
         mem_gb = gpu.total_memory / 1e9
-        use_4bit = mem_gb < 24 
+        use_4bit = mem_gb < 24
         use_8bit = 24 <= mem_gb < 40 and not use_4bit
-        print(f"Memory optimization: 4bit={use_4bit}, 8bit={use_8bit}") # Note: Quantization args not used in this script version
+        print(
+            f"Memory optimization: 4bit={use_4bit}, 8bit={use_8bit}"
+        )  # Note: Quantization args not used in this script version
     else:
         print("GPU not available, using CPU")
         use_4bit = False
         use_8bit = False
 
     model_kwargs = {
-        "use_auth_token": token, # "token" is the more current HF arg name
+        "use_auth_token": token,  # "token" is the more current HF arg name
         "device_map": "auto",
-        "torch_dtype": torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32,
+        "torch_dtype": (
+            torch.bfloat16
+            if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+            else torch.float32
+        ),
         "cache_dir": cache_dir,
-        "trust_remote_code": True # Often needed for instruct/chat models
+        "trust_remote_code": True,  # Often needed for instruct/chat models
     }
 
     print(f"Loading tokenizer for base model: {model_name} using cache: {cache_dir}...")
     tokenizer = AutoTokenizer.from_pretrained(
-        model_name, 
-        token=token, # use "token"
-        cache_dir=cache_dir, 
+        model_name,
+        token=token,  # use "token"
+        cache_dir=cache_dir,
         trust_remote_code=True,
-        model_max_length=32768  # <--- Explicitly set model_max_length
+        model_max_length=32768,  # <--- Explicitly set model_max_length
     )
 
     # Mistral models typically expect left padding for batched generation.
@@ -179,30 +187,30 @@ def load_model(model_name, token=None, lora_path=None, cache_dir=None):
     if tokenizer.pad_token is None:
         print("pad_token is None. Setting pad_token = eos_token")
         tokenizer.pad_token = tokenizer.eos_token
-    
+
     # Ensure model config reflects pad_token_id if it's set on model init
     # model.config.pad_token_id = tokenizer.pad_token_id (can be set after model load)
-
 
     try:
         print(f"Loading base model: {model_name} with config: {model_kwargs}")
         model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
     except Exception as e:
         print(f"Error loading base model with specified dtype/config: {e}")
-        print("Falling back to basic loading for base model (FP32 default if GPU available and not BF16)...")
+        print(
+            "Falling back to basic loading for base model (FP32 default if GPU available and not BF16)..."
+        )
         # Fallback: remove torch_dtype or set to float32 if bfloat16 failed
         model_kwargs.pop("torch_dtype", None)
         model = AutoModelForCausalLM.from_pretrained(
-            model_name, 
+            model_name,
             token=token,
-            device_map="auto", # keep auto device_map
+            device_map="auto",  # keep auto device_map
             cache_dir=cache_dir,
-            trust_remote_code=True
+            trust_remote_code=True,
         )
         # Manually move to cuda if not done by device_map and GPU is available
-        if torch.cuda.is_available() and next(model.parameters()).device.type == 'cpu':
+        if torch.cuda.is_available() and next(model.parameters()).device.type == "cpu":
             model = model.to("cuda")
-
 
     if lora_path:
         print(f"LoRA path provided: {lora_path}")
@@ -237,15 +245,13 @@ def load_model(model_name, token=None, lora_path=None, cache_dir=None):
 def classify_samples(tokenizer, model, prompt_messages_list, batch_size=8):
     predictions = []
     device = next(model.parameters()).device
-    global_debug_printed = {'printed': False}  # 用字典保证引用一致
+    global_debug_printed = {"printed": False}  # 用字典保证引用一致
 
     if torch.cuda.is_available():
         gpu = torch.cuda.get_device_properties(0)
         mem_gb = gpu.total_memory / 1e9
-        suggested_batch = max(
-            1, min(int(mem_gb // 5), 32)
-        )
-        if batch_size == 1 and len(prompt_messages_list) > 1 :
+        suggested_batch = max(1, min(int(mem_gb // 5), 32))
+        if batch_size == 1 and len(prompt_messages_list) > 1:
             batch_size = suggested_batch
             print(
                 f"Auto-tuned batch size: {batch_size} based on {mem_gb:.1f}GB GPU memory"
@@ -274,7 +280,11 @@ def classify_samples(tokenizer, model, prompt_messages_list, batch_size=8):
 
         try:
             inputs = tokenizer(
-                batch_prompts_formatted, padding=True, return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length
+                batch_prompts_formatted,
+                padding=True,
+                return_tensors="pt",
+                truncation=True,
+                max_length=tokenizer.model_max_length,
             ).to(device)
 
             with torch.no_grad():
@@ -301,13 +311,19 @@ def classify_samples(tokenizer, model, prompt_messages_list, batch_size=8):
                     print(f"  Sample {j+1}:")
                     printable_prompt = batch_prompts_formatted[j]
                     if len(printable_prompt) > 300:
-                        printable_prompt = printable_prompt[:150] + "..." + printable_prompt[-150:]
+                        printable_prompt = (
+                            printable_prompt[:150] + "..." + printable_prompt[-150:]
+                        )
                     print(f"    Prompt (Mistral formatted): {printable_prompt}")
                     print(f"    Generated: {generated_text}")
                     print(f"    Prediction: {prediction}")
 
             batch_time = time.time() - batch_start
-            samples_per_sec = len(batch_prompts_formatted) / batch_time if batch_time > 0 else float('inf')
+            samples_per_sec = (
+                len(batch_prompts_formatted) / batch_time
+                if batch_time > 0
+                else float("inf")
+            )
             pbar.set_postfix(
                 samples_per_sec=f"{samples_per_sec:.1f}",
                 batch_time=f"{batch_time:.2f}s",
@@ -317,26 +333,38 @@ def classify_samples(tokenizer, model, prompt_messages_list, batch_size=8):
             print(f"Error in batch processing (batch starting at index {i}): {e}")
             print("Attempting to process samples in this batch individually...")
             for k, individual_messages in enumerate(batch_messages):
-                try: # Outer try-except for apply_chat_template and subsequent steps
+                try:  # Outer try-except for apply_chat_template and subsequent steps
                     prompt_formatted = tokenizer.apply_chat_template(
                         individual_messages, tokenize=False, add_generation_prompt=True
                     )
                     print(f"  Processing individual prompt {i+k+1} (fallback)")
 
-                    try: # Inner try-except for tokenizer() and model.generate()
-                        if not global_debug_printed['printed']: # Only print for the first attempt that might fail
+                    try:  # Inner try-except for tokenizer() and model.generate()
+                        if not global_debug_printed[
+                            "printed"
+                        ]:  # Only print for the first attempt that might fail
                             print(f"DEBUG: About to call tokenizer for sample {i+k+1}")
-                            print(f"DEBUG: tokenizer.model_max_length = {tokenizer.model_max_length}")
-                            print(f"DEBUG: type(tokenizer.model_max_length) = {type(tokenizer.model_max_length)}")
-                            print(f"DEBUG: tokenizer.vocab_size = {tokenizer.vocab_size}")
-                            print(f"DEBUG: len(prompt_formatted) = {len(prompt_formatted)}")
-                            print(f"DEBUG: prompt_formatted[:500] = {prompt_formatted[:500]}") # Print start of prompt
+                            print(
+                                f"DEBUG: tokenizer.model_max_length = {tokenizer.model_max_length}"
+                            )
+                            print(
+                                f"DEBUG: type(tokenizer.model_max_length) = {type(tokenizer.model_max_length)}"
+                            )
+                            print(
+                                f"DEBUG: tokenizer.vocab_size = {tokenizer.vocab_size}"
+                            )
+                            print(
+                                f"DEBUG: len(prompt_formatted) = {len(prompt_formatted)}"
+                            )
+                            print(
+                                f"DEBUG: prompt_formatted[:500] = {prompt_formatted[:500]}"
+                            )  # Print start of prompt
 
                         inputs_single = tokenizer(
                             prompt_formatted,
                             return_tensors="pt",
                             truncation=True,
-                            max_length=tokenizer.model_max_length
+                            max_length=tokenizer.model_max_length,
                         ).to(device)
 
                         with torch.no_grad():
@@ -350,51 +378,84 @@ def classify_samples(tokenizer, model, prompt_messages_list, batch_size=8):
                                 eos_token_id=tokenizer.eos_token_id,
                             )
 
-                        generated_tokens_single = outputs_single[0, inputs_single.input_ids.shape[1]:]
+                        generated_tokens_single = outputs_single[
+                            0, inputs_single.input_ids.shape[1] :
+                        ]
                         generated_text_single = tokenizer.decode(
                             generated_tokens_single, skip_special_tokens=True
                         ).strip()
                         prediction_single = parse_answer(generated_text_single)
                         predictions.append(prediction_single)
-                        print(f"    Fallback Sample {i+k+1} - Generated: {generated_text_single}, Prediction: {prediction_single}")
+                        print(
+                            f"    Fallback Sample {i+k+1} - Generated: {generated_text_single}, Prediction: {prediction_single}"
+                        )
 
-                    except Exception as inner_e: # Catches errors from tokenizer() or model.generate()
-                        print(f"  Error in single sample processing (fallback for sample {i+k+1}): {inner_e}")
-                        if not global_debug_printed['printed']:
-                            print("==== FIRST ERROR DETAILS (tokenizer or generation failed) ====")
+                    except (
+                        Exception
+                    ) as inner_e:  # Catches errors from tokenizer() or model.generate()
+                        print(
+                            f"  Error in single sample processing (fallback for sample {i+k+1}): {inner_e}"
+                        )
+                        if not global_debug_printed["printed"]:
+                            print(
+                                "==== FIRST ERROR DETAILS (tokenizer or generation failed) ===="
+                            )
                             print(f"Sample index: {i+k+1}")
-                            print(f"Prompt length (characters): {len(prompt_formatted)}")
+                            print(
+                                f"Prompt length (characters): {len(prompt_formatted)}"
+                            )
                             print("Prompt content that was being processed:")
                             print(prompt_formatted)
                             print("---")
-                            if 'inputs_single' in locals() and inputs_single is not None:
-                                print("inputs_single was created (tokenizer likely succeeded, error might be in generate?):")
+                            if (
+                                "inputs_single" in locals()
+                                and inputs_single is not None
+                            ):
+                                print(
+                                    "inputs_single was created (tokenizer likely succeeded, error might be in generate?):"
+                                )
                                 try:
                                     print("  input_ids:", inputs_single["input_ids"])
-                                    print("  max token id:", inputs_single["input_ids"].max().item())
-                                    print("  min token id:", inputs_single["input_ids"].min().item())
+                                    print(
+                                        "  max token id:",
+                                        inputs_single["input_ids"].max().item(),
+                                    )
+                                    print(
+                                        "  min token id:",
+                                        inputs_single["input_ids"].min().item(),
+                                    )
                                 except Exception as e_print_ids:
-                                    print(f"  (Error printing input_ids details: {e_print_ids})")
+                                    print(
+                                        f"  (Error printing input_ids details: {e_print_ids})"
+                                    )
                             else:
-                                print("inputs_single was NOT created (tokenizer() call itself likely failed with the error above).")
+                                print(
+                                    "inputs_single was NOT created (tokenizer() call itself likely failed with the error above)."
+                                )
                             print("---")
                             # Ensure model_max_length is printed again here if it wasn't due to early exit logic
                             if tokenizer is not None:
-                                print(f"VERIFY: tokenizer.model_max_length at time of error log = {tokenizer.model_max_length}")
-                            global_debug_printed['printed'] = True
+                                print(
+                                    f"VERIFY: tokenizer.model_max_length at time of error log = {tokenizer.model_max_length}"
+                                )
+                            global_debug_printed["printed"] = True
                             print("Exiting after first error to capture debug info.")
                             sys.exit(1)
                         predictions.append("UNKNOWN")
 
-                except Exception as outer_e: # Catches errors from apply_chat_template
-                    print(f"  Error in prompt construction (fallback for sample {i+k+1}): {outer_e}")
-                    if not global_debug_printed['printed']:
-                        print("==== FIRST ERROR DETAILS (prompt construction failed) ====")
+                except Exception as outer_e:  # Catches errors from apply_chat_template
+                    print(
+                        f"  Error in prompt construction (fallback for sample {i+k+1}): {outer_e}"
+                    )
+                    if not global_debug_printed["printed"]:
+                        print(
+                            "==== FIRST ERROR DETAILS (prompt construction failed) ===="
+                        )
                         print(f"Sample index: {i+k+1}")
                         print("Individual messages that caused the error:")
                         print(f"  individual_messages: {individual_messages}")
                         print("---")
-                        global_debug_printed['printed'] = True
+                        global_debug_printed["printed"] = True
                         print("Exiting after first error to capture debug info.")
                         sys.exit(1)
                     predictions.append("UNKNOWN")
@@ -402,12 +463,14 @@ def classify_samples(tokenizer, model, prompt_messages_list, batch_size=8):
     pbar.close()
 
     total_time = time.time() - start_time
-    avg_samples_per_sec = len(prompt_messages_list) / total_time if total_time > 0 else float('inf')
+    avg_samples_per_sec = (
+        len(prompt_messages_list) / total_time if total_time > 0 else float("inf")
+    )
     print(
         f"Total processing time: {total_time:.2f}s, Average speed: {avg_samples_per_sec:.1f} samples/sec"
     )
 
-    if predictions: 
+    if predictions:
         supported_count = predictions.count("SUPPORTED")
         refuted_count = predictions.count("REFUTED")
         unknown_count = predictions.count("UNKNOWN")
@@ -418,8 +481,10 @@ def classify_samples(tokenizer, model, prompt_messages_list, batch_size=8):
             f"  SUPPORTED: {supported_count} ({supported_count/total_preds*100:.1f}%)"
         )
         print(f"  REFUTED: {refuted_count} ({refuted_count/total_preds*100:.1f}%)")
-        if unknown_count > 0 or total_preds == 0: 
-            print(f"  UNKNOWN: {unknown_count} ({unknown_count/total_preds*100 if total_preds > 0 else 0:.1f}%)")
+        if unknown_count > 0 or total_preds == 0:
+            print(
+                f"  UNKNOWN: {unknown_count} ({unknown_count/total_preds*100 if total_preds > 0 else 0:.1f}%)"
+            )
     else:
         print("No predictions were made.")
 
@@ -429,7 +494,7 @@ def classify_samples(tokenizer, model, prompt_messages_list, batch_size=8):
 def parse_answer(output_text):
     # This function is designed to be robust for "SUPPORTED" or "REFUTED"
     # Mistral instruct models are generally good at following instructions for one-word answers.
-    
+
     cleaned_output_upper = output_text.strip().upper()
 
     # Check for direct keywords first
@@ -447,14 +512,23 @@ def parse_answer(output_text):
     # Defaulting to REFUTED might be safer in some contexts, but UNKNOWN is more accurate for failed parsing
     # print(f"Unrecognized answer: '{output_text}' (defaulting to UNKNOWN)")
     # Check if the exact word is present, even if not first
-    if "SUPPORTED" in cleaned_output_upper: return "SUPPORTED" # Re-check without word order constraint
-    if "REFUTED" in cleaned_output_upper: return "REFUTED"
-    
+    if "SUPPORTED" in cleaned_output_upper:
+        return "SUPPORTED"  # Re-check without word order constraint
+    if "REFUTED" in cleaned_output_upper:
+        return "REFUTED"
+
     print(f"Unrecognized answer: '{output_text}' (Defaulting to REFUTED for metrics)")
     return "UNKNOWN"
 
 
-def compare_results(df, original_predictions, adversarial_predictions, valid_samples_count, export_flipped_csv=None, skipped_samples_indices=None):
+def compare_results(
+    df,
+    original_predictions,
+    adversarial_predictions,
+    valid_samples_count,
+    export_flipped_csv=None,
+    skipped_samples_indices=None,
+):
     if skipped_samples_indices is None:
         skipped_samples_indices = []
 
@@ -468,33 +542,36 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
     if len(processed_indices) == len(original_predictions):
         df.loc[processed_indices, "original_prediction"] = original_predictions
     else:
-        print(f"Warning: Mismatch in length between processed indices ({len(processed_indices)}) and original_predictions ({len(original_predictions)}). Alignment may be incorrect.")
+        print(
+            f"Warning: Mismatch in length between processed indices ({len(processed_indices)}) and original_predictions ({len(original_predictions)}). Alignment may be incorrect."
+        )
         # Fallback or error handling if lengths don't match processed_indices
-        if len(df) == len(original_predictions): # If df was pre-filtered
-             df["original_prediction"] = original_predictions
-
+        if len(df) == len(original_predictions):  # If df was pre-filtered
+            df["original_prediction"] = original_predictions
 
     if len(processed_indices) == len(adversarial_predictions):
         df.loc[processed_indices, "adversarial_prediction"] = adversarial_predictions
     else:
-        print(f"Warning: Mismatch in length between processed indices ({len(processed_indices)}) and adversarial_predictions ({len(adversarial_predictions)}). Alignment may be incorrect.")
-        if len(df) == len(adversarial_predictions): # If df was pre-filtered
+        print(
+            f"Warning: Mismatch in length between processed indices ({len(processed_indices)}) and adversarial_predictions ({len(adversarial_predictions)}). Alignment may be incorrect."
+        )
+        if len(df) == len(adversarial_predictions):  # If df was pre-filtered
             df["adversarial_prediction"] = adversarial_predictions
 
-
-    df["comparison_result"] = "Not Run" 
+    df["comparison_result"] = "Not Run"
 
     if "correctness" not in df.columns:
         print(
             "Warning: 'correctness' column not found. Skipping Clean Accuracy and related metrics."
         )
         clean_accuracy = 0
-        df["original_is_correct"] = False 
+        df["original_is_correct"] = False
         num_correct_original_samples_valid_gt = 0
     else:
         df["mapped_correctness"] = (
             df["correctness"]
-            .astype(str).str.upper() # Ensure string type before .str accessor
+            .astype(str)
+            .str.upper()  # Ensure string type before .str accessor
             .replace(
                 {
                     "SUPPORTS": "SUPPORTED",
@@ -529,38 +606,49 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
 
     # Filter out rows where predictions might be NA (e.g. due to earlier errors or skips not caught by processed_indices)
     # before calculating prediction_flipped
-    valid_pred_mask = df["original_prediction"].notna() & df["adversarial_prediction"].notna()
-    
-    df["prediction_flipped"] = False # Initialize column
-    df.loc[valid_pred_mask, "prediction_flipped"] = df.loc[valid_pred_mask, "original_prediction"] != df.loc[valid_pred_mask, "adversarial_prediction"]
+    valid_pred_mask = (
+        df["original_prediction"].notna() & df["adversarial_prediction"].notna()
+    )
 
+    df["prediction_flipped"] = False  # Initialize column
+    df.loc[valid_pred_mask, "prediction_flipped"] = (
+        df.loc[valid_pred_mask, "original_prediction"]
+        != df.loc[valid_pred_mask, "adversarial_prediction"]
+    )
 
     # valid_samples_count is the number of samples for which prompts were built
     # Use this for flip rate denominator as it represents successfully processed pairs
     flipped_samples_count = df.loc[valid_pred_mask, "prediction_flipped"].sum()
-    
+
     # Ensure valid_samples_count is used as the denominator for overall flip rate
     # This count comes from construct_prompts function and represents pairs that went into classification
-    if valid_samples_count > 0 :
+    if valid_samples_count > 0:
         overall_flip_rate = flipped_samples_count / valid_samples_count
     else:
         overall_flip_rate = 0
 
-
     meaning_preserving_mask = df["agreed_labels"] == 0
-    meaning_preserving_df = df[meaning_preserving_mask & valid_pred_mask].copy() # Also ensure predictions exist
-    num_meaning_preserving_evaluable = len(meaning_preserving_df) # MP samples with valid predictions
-    
+    meaning_preserving_df = df[
+        meaning_preserving_mask & valid_pred_mask
+    ].copy()  # Also ensure predictions exist
+    num_meaning_preserving_evaluable = len(
+        meaning_preserving_df
+    )  # MP samples with valid predictions
+
     flips_in_meaning_preserving = meaning_preserving_df["prediction_flipped"].sum()
 
     # This rate is "Flips in Meaning-Preserving / All Valid Samples (from prompt construction)"
     flip_rate_mp_vs_all = (
-        flips_in_meaning_preserving / valid_samples_count if valid_samples_count > 0 else 0
+        flips_in_meaning_preserving / valid_samples_count
+        if valid_samples_count > 0
+        else 0
     )
 
     if "correctness" in df.columns:
         correct_and_meaning_preserving_df = meaning_preserving_df[
-            meaning_preserving_df["original_is_correct"] # original_is_correct already implies valid_pred_mask due to its calculation
+            meaning_preserving_df[
+                "original_is_correct"
+            ]  # original_is_correct already implies valid_pred_mask due to its calculation
         ]
         num_correct_and_mp_evaluable = len(correct_and_meaning_preserving_df)
 
@@ -568,7 +656,7 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
             "prediction_flipped"
         ].sum()
 
-        robust_flip_rate = ( # Flips in (Correct & MP) / Count of (Correct & MP)
+        robust_flip_rate = (  # Flips in (Correct & MP) / Count of (Correct & MP)
             flips_in_correct_and_mp / num_correct_and_mp_evaluable
             if num_correct_and_mp_evaluable > 0
             else 0
@@ -580,9 +668,11 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
         print(
             f"Flip Rate (for Meaning-Preserving & Correctly Classified Originals): {robust_flip_rate:.2%} ({flips_in_correct_and_mp}/{num_correct_and_mp_evaluable})"
         )
-        
-        if num_correct_and_mp_evaluable > 0: # Denominator for targeted MP flip rate
-            mp_flip_rate_targeted = flips_in_meaning_preserving / num_correct_and_mp_evaluable
+
+        if num_correct_and_mp_evaluable > 0:  # Denominator for targeted MP flip rate
+            mp_flip_rate_targeted = (
+                flips_in_meaning_preserving / num_correct_and_mp_evaluable
+            )
         else:
             mp_flip_rate_targeted = float("nan")
         print(
@@ -593,23 +683,37 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
         print(
             "Robust Flip Rate metrics: Not calculated ('correctness' column missing)."
         )
-        robust_flip_rate = float('nan') # Define for consistency if correctness is missing
+        robust_flip_rate = float(
+            "nan"
+        )  # Define for consistency if correctness is missing
 
-
-    print(f"\nOverall Metrics (based on {valid_samples_count} valid sample pairs from prompt construction):")
-    print(f"  Total Flipped Pairs (where both original/adversary were predicted): {flipped_samples_count}")
+    print(
+        f"\nOverall Metrics (based on {valid_samples_count} valid sample pairs from prompt construction):"
+    )
+    print(
+        f"  Total Flipped Pairs (where both original/adversary were predicted): {flipped_samples_count}"
+    )
     print(f"  Overall Flip Rate: {overall_flip_rate:.2%}")
 
-    print(f"\nMeaning-Preserving Metrics (Total evaluable: {num_meaning_preserving_evaluable} pairs with agreed_labels=0 and valid predictions):")
-    print(f"  Flipped Pairs within Meaning-Preserving (evaluable): {flips_in_meaning_preserving}")
+    print(
+        f"\nMeaning-Preserving Metrics (Total evaluable: {num_meaning_preserving_evaluable} pairs with agreed_labels=0 and valid predictions):"
+    )
+    print(
+        f"  Flipped Pairs within Meaning-Preserving (evaluable): {flips_in_meaning_preserving}"
+    )
     print(
         f"  Flip Rate (Meaning-Preserving Flips / All Valid Sample Pairs): {flip_rate_mp_vs_all:.2%}"
     )
-    
-    # Flip rate *within* the meaning-preserving subset that was evaluable
-    flip_rate_within_mp_evaluable = flips_in_meaning_preserving / num_meaning_preserving_evaluable if num_meaning_preserving_evaluable > 0 else 0
-    print(f"  Flip Rate (within Meaning-Preserving evaluable subset): {flip_rate_within_mp_evaluable:.2%}")
 
+    # Flip rate *within* the meaning-preserving subset that was evaluable
+    flip_rate_within_mp_evaluable = (
+        flips_in_meaning_preserving / num_meaning_preserving_evaluable
+        if num_meaning_preserving_evaluable > 0
+        else 0
+    )
+    print(
+        f"  Flip Rate (within Meaning-Preserving evaluable subset): {flip_rate_within_mp_evaluable:.2%}"
+    )
 
     if export_flipped_csv:
         # We want to export samples that are:
@@ -619,11 +723,11 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
         if "correctness" in df.columns and "original_is_correct" in df.columns:
             # Start with meaning-preserving that were originally correct
             base_df_for_export = df[
-                (df["agreed_labels"] == 0) & 
-                (df["original_is_correct"] == True) &
-                (valid_pred_mask) # Ensure they had valid predictions
+                (df["agreed_labels"] == 0)
+                & (df["original_is_correct"] == True)
+                & (valid_pred_mask)  # Ensure they had valid predictions
             ].copy()
-            
+
             # From this subset, select those that actually flipped
             flipped_samples_to_export_df = base_df_for_export[
                 base_df_for_export["prediction_flipped"] == True
@@ -631,29 +735,37 @@ def compare_results(df, original_predictions, adversarial_predictions, valid_sam
 
             if not flipped_samples_to_export_df.empty:
                 columns_to_select = [
-                    "original_samples", 
-                    "adversarial_samples", 
-                    "correctness", 
-                    "agreed_labels", 
-                    "original_prediction", 
+                    "original_samples",
+                    "adversarial_samples",
+                    "correctness",
+                    "agreed_labels",
+                    "original_prediction",
                     "adversarial_prediction",
                     "prediction_flipped",
-                    "mapped_correctness", # Helpful for debugging
-                    "original_is_correct" # Helpful for debugging
+                    "mapped_correctness",  # Helpful for debugging
+                    "original_is_correct",  # Helpful for debugging
                 ]
                 # Ensure all selected columns exist; add if missing for safety
                 for col in columns_to_select:
                     if col not in flipped_samples_to_export_df.columns:
-                        flipped_samples_to_export_df[col] = pd.NA # Add as NA if missing
+                        flipped_samples_to_export_df[col] = (
+                            pd.NA
+                        )  # Add as NA if missing
 
                 export_df = flipped_samples_to_export_df[columns_to_select]
-                
+
                 export_df.to_csv(export_flipped_csv, index=False)
-                print(f"\nExported {len(export_df)} samples (numerator of 'Robust Flip Rate') to: {export_flipped_csv}")
+                print(
+                    f"\nExported {len(export_df)} samples (numerator of 'Robust Flip Rate') to: {export_flipped_csv}"
+                )
             else:
-                print(f"\nNo samples to export for Robust Flip Rate numerator (path: {export_flipped_csv}). (Meaning-preserving, originally correct, and flipped).")
+                print(
+                    f"\nNo samples to export for Robust Flip Rate numerator (path: {export_flipped_csv}). (Meaning-preserving, originally correct, and flipped)."
+                )
         else:
-            print(f"\nCould not export flipped samples to {export_flipped_csv}: 'correctness' or 'original_is_correct' column processing issue.")
+            print(
+                f"\nCould not export flipped samples to {export_flipped_csv}: 'correctness' or 'original_is_correct' column processing issue."
+            )
 
     return df
 
@@ -665,7 +777,7 @@ def main():
     parser.add_argument(
         "--model_name",
         type=str,
-        default="mistralai/Mistral-7B-Instruct-v0.3", 
+        default="mistralai/Mistral-7B-Instruct-v0.3",
         help="Name of the Mistral Instruct model to use from Hugging Face Hub.",
     )
     parser.add_argument(
@@ -676,7 +788,7 @@ def main():
     )
     parser.add_argument(
         "--data_file",
-        default="./data/adversarial_dataset_corrected.csv", # Ensure this path is correct
+        default="./data/adversarial_dataset_corrected.csv",  # Ensure this path is correct
         help="Path to dataset CSV file.",
     )
     parser.add_argument(
@@ -689,7 +801,10 @@ def main():
         "--batch_size", type=int, default=8, help="Batch size for model inference."
     )
     parser.add_argument(
-        "--token", type=str, default="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", help="Hugging Face API token (if needed for gated models, though Mistral-7B-Instruct v0.3 is open)."
+        "--token",
+        type=str,
+        default="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",
+        help="Hugging Face API token (if needed for gated models, though Mistral-7B-Instruct v0.3 is open).",
     )
     parser.add_argument(
         "--max_samples",
@@ -700,7 +815,7 @@ def main():
     parser.add_argument(
         "--export_flipped_csv",
         type=str,
-        default=None, # e.g., "flipped_robust_mistral.csv"
+        default=None,  # e.g., "flipped_robust_mistral.csv"
         help="Optional path to save a CSV of (Meaning-Preserving & Correctly Classified Originals) that were flipped.",
     )
     parser.add_argument(
@@ -720,22 +835,23 @@ def main():
     if args.max_samples is not None:
         print(f"Processing a maximum of {args.max_samples} samples.")
 
-
     df = load_data(args.data_file)
     if args.max_samples is not None:
         df = df.head(args.max_samples)
 
     tokenizer, model = load_model(
-        args.model_name, token=args.token, lora_path=args.lora_path, cache_dir=args.cache_dir
+        args.model_name,
+        token=args.token,
+        lora_path=args.lora_path,
+        cache_dir=args.cache_dir,
     )
-
 
     print("Constructing prompts for Mistral format...")
     (
         original_prompt_messages,
         adversarial_prompt_messages,
-        skipped_samples_indices, 
-        valid_samples_count, # This is the count of pairs for which prompts were successfully constructed
+        skipped_samples_indices,
+        valid_samples_count,  # This is the count of pairs for which prompts were successfully constructed
     ) = construct_prompts_for_mistral(df, tokenizer)
 
     # Filter df to only include rows for which prompts were constructed successfully BEFORE classification
@@ -747,45 +863,52 @@ def main():
     # Store skipped indices in df attributes for potential use, though direct passing is better
     # df.attrs["skipped_samples_indices"] = skipped_samples_indices
 
-
     if not original_prompt_messages:
-        print("No valid original samples to classify after prompt construction. Exiting.")
+        print(
+            "No valid original samples to classify after prompt construction. Exiting."
+        )
         return
     if not adversarial_prompt_messages:
-        print("No valid adversarial samples to classify after prompt construction. Exiting.")
+        print(
+            "No valid adversarial samples to classify after prompt construction. Exiting."
+        )
         return
 
-
     print("\nClassifying original samples (Mistral)...")
-    original_predictions = classify_samples( # Removed parse_answer from here, it's done inside
-        tokenizer, model, original_prompt_messages, batch_size=args.batch_size
+    original_predictions = (
+        classify_samples(  # Removed parse_answer from here, it's done inside
+            tokenizer, model, original_prompt_messages, batch_size=args.batch_size
+        )
     )
 
     print("\nClassifying adversarial samples (Mistral)...")
-    adversarial_predictions = classify_samples( # Removed parse_answer from here
+    adversarial_predictions = classify_samples(  # Removed parse_answer from here
         tokenizer, model, adversarial_prompt_messages, batch_size=args.batch_size
     )
-    
+
     # Ensure predictions lists are not empty and their lengths match valid_samples_count
     if len(original_predictions) != valid_samples_count:
-        print(f"Warning: Original predictions count ({len(original_predictions)}) mismatch with valid samples count ({valid_samples_count}).")
+        print(
+            f"Warning: Original predictions count ({len(original_predictions)}) mismatch with valid samples count ({valid_samples_count})."
+        )
     if len(adversarial_predictions) != valid_samples_count:
-        print(f"Warning: Adversarial predictions count ({len(adversarial_predictions)}) mismatch with valid samples count ({valid_samples_count}).")
-
+        print(
+            f"Warning: Adversarial predictions count ({len(adversarial_predictions)}) mismatch with valid samples count ({valid_samples_count})."
+        )
 
     # Pass the original df, the predictions (which correspond to non-skipped samples),
     # the count of valid samples, and the list of skipped indices.
     df_results = compare_results(
-        df.copy(), 
+        df.copy(),
         original_predictions,
         adversarial_predictions,
-        valid_samples_count, 
+        valid_samples_count,
         args.export_flipped_csv,
-        skipped_samples_indices=skipped_samples_indices # Pass the skipped indices here
+        skipped_samples_indices=skipped_samples_indices,  # Pass the skipped indices here
     )
     # df_results.to_csv(args.output_file, index=False)
     # print(f"\nResults saved to {args.output_file}")
 
 
 if __name__ == "__main__":
-    main() 
+    main()
